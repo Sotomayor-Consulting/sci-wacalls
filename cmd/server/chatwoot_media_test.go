@@ -50,6 +50,13 @@ func TestMediaFilename(t *testing.T) {
 	if got := mediaFilename("audio", "", ""); got != "audio.ogg" {
 		t.Fatalf("fallback audio: %q", got)
 	}
+	// nota de voz de WhatsApp: opus con parámetro codecs → audio.ogg (no .oga)
+	if got := mediaFilename("audio", "audio/ogg; codecs=opus", "audio"); got != "audio.ogg" {
+		t.Fatalf("voz opus: %q; quería audio.ogg", got)
+	}
+	if got := cleanMimetype("audio/ogg; codecs=opus"); got != "audio/ogg" {
+		t.Fatalf("cleanMimetype: %q", got)
+	}
 }
 
 func TestChatwootFileTypeToMedia(t *testing.T) {

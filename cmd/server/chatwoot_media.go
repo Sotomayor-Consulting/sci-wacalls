@@ -38,28 +38,56 @@ func extractIncomingMedia(m *waE2E.Message) (incomingMedia, bool) {
 	switch {
 	case m.GetImageMessage() != nil:
 		im := m.GetImageMessage()
-		return incomingMedia{"image", im.GetMimetype(), mediaFilename("image", im.GetMimetype(), "imagen"), im.GetCaption()}, true
+		mt := cleanMimetype(im.GetMimetype())
+		return incomingMedia{"image", mt, mediaFilename("image", mt, "imagen"), im.GetCaption()}, true
 	case m.GetVideoMessage() != nil:
 		vm := m.GetVideoMessage()
-		return incomingMedia{"video", vm.GetMimetype(), mediaFilename("video", vm.GetMimetype(), "video"), vm.GetCaption()}, true
+		mt := cleanMimetype(vm.GetMimetype())
+		return incomingMedia{"video", mt, mediaFilename("video", mt, "video"), vm.GetCaption()}, true
 	case m.GetAudioMessage() != nil:
 		am := m.GetAudioMessage()
-		return incomingMedia{"audio", am.GetMimetype(), mediaFilename("audio", am.GetMimetype(), "audio"), ""}, true
+		mt := cleanMimetype(am.GetMimetype())
+		return incomingMedia{"audio", mt, mediaFilename("audio", mt, "audio"), ""}, true
 	case m.GetDocumentMessage() != nil:
 		dm := m.GetDocumentMessage()
-		fn := firstNonEmpty(dm.GetFileName(), mediaFilename("document", dm.GetMimetype(), "documento"))
-		return incomingMedia{"document", dm.GetMimetype(), fn, dm.GetCaption()}, true
+		mt := cleanMimetype(dm.GetMimetype())
+		fn := firstNonEmpty(dm.GetFileName(), mediaFilename("document", mt, "documento"))
+		return incomingMedia{"document", mt, fn, dm.GetCaption()}, true
 	case m.GetStickerMessage() != nil:
 		sm := m.GetStickerMessage()
-		return incomingMedia{"image", sm.GetMimetype(), mediaFilename("image", sm.GetMimetype(), "sticker"), ""}, true
+		mt := cleanMimetype(sm.GetMimetype())
+		return incomingMedia{"image", mt, mediaFilename("image", mt, "sticker"), ""}, true
 	}
 	return incomingMedia{}, false
 }
 
-// mediaFilename arma un nombre de archivo con la extensión inferida del mimetype.
+// canonicalExt mapea mimetypes comunes a la extensión "canónica" que esperan los
+// reproductores/visores. Evita rarezas como audio/ogg -> .oga (que Chatwoot no
+// clasifica bien como audio y le cuelga el reproductor: usamos .ogg como la
+// build de referencia).
+var canonicalExt = map[string]string{
+	"audio/ogg":       ".ogg",
+	"audio/mpeg":      ".mp3",
+	"audio/mp4":       ".m4a",
+	"audio/aac":       ".aac",
+	"audio/wav":       ".wav",
+	"image/jpeg":      ".jpg",
+	"image/png":       ".png",
+	"image/webp":      ".webp",
+	"image/gif":       ".gif",
+	"video/mp4":       ".mp4",
+	"video/3gpp":      ".3gp",
+	"application/pdf": ".pdf",
+}
+
+// mediaFilename arma un nombre de archivo con la extensión adecuada al mimetype.
 func mediaFilename(kind, mimetype, stem string) string {
 	if stem == "" {
 		stem = kind
+	}
+	base := strings.TrimSpace(strings.SplitN(mimetype, ";", 2)[0]) // quita "; codecs=opus"
+	if ext, ok := canonicalExt[base]; ok {
+		return stem + ext
 	}
 	if exts, err := mime.ExtensionsByType(mimetype); err == nil && len(exts) > 0 {
 		return stem + exts[0]
@@ -74,6 +102,12 @@ func mediaFilename(kind, mimetype, stem string) string {
 	default:
 		return stem + ".bin"
 	}
+}
+
+// cleanMimetype quita parámetros (";codecs=…") del mimetype para no confundir a
+// Chatwoot / al reproductor del navegador.
+func cleanMimetype(m string) string {
+	return strings.TrimSpace(strings.SplitN(m, ";", 2)[0])
 }
 
 // postAttachment crea un mensaje en Chatwoot con un adjunto (multipart/form-data).
