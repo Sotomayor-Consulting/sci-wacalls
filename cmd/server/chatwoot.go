@@ -79,12 +79,18 @@ func (c ChatwootConfig) req(ctx context.Context, method, path string, body any) 
 // ---------- WhatsApp -> Chatwoot ----------
 
 // handleIncomingMessage empuja un mensaje entrante de WhatsApp a Chatwoot
-// (texto o adjunto). Solo procesa conversaciones 1:1 que no vienen de la propia
-// cuenta (los grupos quedan fuera de alcance: el Inbox B es una línea 1:1).
-// Acepta tanto direccionamiento por teléfono (s.whatsapp.net) como por LID
-// (@lid) — WhatsApp está migrando a LID y muchos entrantes llegan así.
+// (texto o adjunto), en ambas direcciones:
+//   - entrante (del cliente): se postea como "incoming".
+//   - propio del aparato (respondido desde WhatsApp Web/celular, fuera de
+//     Chatwoot): se espeja como NOTA PRIVADA para que el agente vea en Chatwoot
+//     lo que se respondió por fuera. Los mensajes que enviamos por Chatwoot no se
+//     re-espejan (se filtran por isSelfSent).
+// Solo conversaciones 1:1 (los grupos quedan fuera: el Inbox B es una línea 1:1).
+// Acepta teléfono (s.whatsapp.net) y LID (@lid) — WhatsApp está migrando a LID.
+const deviceMirrorPrefix = "📲 Enviado desde WhatsApp:\n"
+
 func (s *Session) handleIncomingMessage(evt *events.Message) {
-	if evt.Info.IsFromMe || evt.Info.IsGroup {
+	if evt.Info.IsGroup {
 		return
 	}
 	switch evt.Info.Chat.Server {
@@ -92,6 +98,10 @@ func (s *Session) handleIncomingMessage(evt *events.Message) {
 		// 1:1 por teléfono o por LID — OK
 	default:
 		return // newsletter, broadcast, grupo, etc.
+	}
+	own := evt.Info.IsFromMe
+	if own && s.isSelfSent(evt.Info.ID) {
+		return // eco de un mensaje que ya enviamos por Chatwoot — no duplicar
 	}
 	text := messageText(evt.Message)
 	media, hasMedia := extractIncomingMedia(evt.Message)
@@ -103,17 +113,19 @@ func (s *Session) handleIncomingMessage(evt *events.Message) {
 		return
 	}
 
-	phone := s.realPhone(evt.Info.MessageSource)
+	phone := s.peerPhone(evt.Info.MessageSource)
 	if phone == "" {
-		s.log.Warn("chatwoot: no se pudo resolver el teléfono del entrante", "chat", evt.Info.Chat.String())
+		s.log.Warn("chatwoot: no se pudo resolver el teléfono del par", "chat", evt.Info.Chat.String())
 		return
 	}
 	// Normalizamos el chatID al JID de teléfono para que entrante y saliente
 	// mapeen a la MISMA conversación de Chatwoot.
 	chatID := phone + "@" + string(types.DefaultUserServer)
-	name := evt.Info.PushName
-	if name == "" {
-		name = phone
+	name := phone
+	if !own {
+		if pn := evt.Info.PushName; pn != "" {
+			name = pn // el PushName de un fromMe es el nuestro, no el del contacto
+		}
 	}
 
 	convID, err := s.mgr.store.lookupConversation(s.mgr.appCtx, s.id, chatID)
@@ -135,30 +147,45 @@ func (s *Session) handleIncomingMessage(evt *events.Message) {
 			s.log.Error("chatwoot: download media failed", "err", err)
 			return
 		}
-		if err := cfg.postAttachment(s.mgr.appCtx, convID, media.caption, media.filename, media.mimetype, data, "incoming"); err != nil {
-			s.log.Error("chatwoot: post incoming attachment failed", "err", err)
+		if own {
+			// espejo del aparato: nota privada con prefijo
+			err = cfg.postPrivateNote(s.mgr.appCtx, convID, deviceMirrorPrefix+media.caption, media.filename, media.mimetype, data)
+		} else {
+			err = cfg.postAttachment(s.mgr.appCtx, convID, media.caption, media.filename, media.mimetype, data, "incoming")
+		}
+		if err != nil {
+			s.log.Error("chatwoot: post attachment failed", "err", err, "own", own)
 			return
 		}
-		s.log.Info("chatwoot: entrante (media) → Chatwoot", "phone", phone, "conv", convID, "kind", media.kind)
+		s.log.Info("chatwoot: media → Chatwoot", "phone", phone, "conv", convID, "kind", media.kind, "own", own)
 		return
 	}
-	if err := cfg.postMessage(s.mgr.appCtx, convID, text, "incoming"); err != nil {
-		s.log.Error("chatwoot: post incoming message failed", "err", err)
+
+	if own {
+		err = cfg.postTextNote(s.mgr.appCtx, convID, deviceMirrorPrefix+text)
+	} else {
+		err = cfg.postMessage(s.mgr.appCtx, convID, text, "incoming")
+	}
+	if err != nil {
+		s.log.Error("chatwoot: post message failed", "err", err, "own", own)
 		return
 	}
-	s.log.Info("chatwoot: entrante (texto) → Chatwoot", "phone", phone, "conv", convID)
+	s.log.Info("chatwoot: texto → Chatwoot", "phone", phone, "conv", convID, "own", own)
 }
 
-// realPhone devuelve el teléfono real (PN) del remitente de un mensaje 1:1,
-// resolviendo el LID cuando hace falta. Preferencia: Chat si ya es un teléfono,
-// luego SenderAlt (la dirección alternativa que trae whatsmeow), luego el store
-// LID→PN, y por último el número del propio LID como fallback.
-func (s *Session) realPhone(src types.MessageSource) string {
+// peerPhone devuelve el teléfono real (PN) del OTRO participante del 1:1,
+// resolviendo el LID. En un fromMe el "par" es el destinatario (RecipientAlt);
+// en un entrante es el remitente (SenderAlt). Chat es el par en ambos casos.
+func (s *Session) peerPhone(src types.MessageSource) string {
 	if src.Chat.Server == types.DefaultUserServer {
 		return src.Chat.User
 	}
-	if src.SenderAlt.Server == types.DefaultUserServer && src.SenderAlt.User != "" {
-		return src.SenderAlt.User
+	alt := src.SenderAlt
+	if src.IsFromMe {
+		alt = src.RecipientAlt
+	}
+	if alt.Server == types.DefaultUserServer && alt.User != "" {
+		return alt.User
 	}
 	if pn, err := s.client.Store.LIDs.GetPNForLID(s.mgr.appCtx, src.Chat); err == nil && pn.User != "" {
 		return pn.User
@@ -370,6 +397,22 @@ func (c ChatwootConfig) postMessage(ctx context.Context, convID int, content, di
 	return nil
 }
 
+// postTextNote crea una NOTA PRIVADA de texto (no se reenvía al cliente; tampoco
+// dispara el webhook de salida porque shouldRelay ignora las privadas). Se usa
+// para espejar en Chatwoot los mensajes respondidos desde el aparato.
+func (c ChatwootConfig) postTextNote(ctx context.Context, convID int, content string) error {
+	payload := map[string]any{"content": content, "message_type": "outgoing", "private": true}
+	path := fmt.Sprintf("/conversations/%d/messages", convID)
+	data, code, err := c.req(ctx, http.MethodPost, path, payload)
+	if err != nil {
+		return err
+	}
+	if code < 200 || code >= 300 {
+		return fmt.Errorf("post note: status %d: %s", code, string(data))
+	}
+	return nil
+}
+
 // ---------- Chatwoot -> WhatsApp ----------
 
 // cwAttachment es un adjunto en el webhook de Chatwoot.
@@ -458,9 +501,11 @@ func (s *Session) deliverToWhatsApp(ctx context.Context, p chatwootWebhookPayloa
 		s.log.Info("chatwoot: saliente (media) → WhatsApp", "to", jid.String(), "n", len(p.Attachments))
 		return nil
 	}
-	if _, err := s.client.SendMessage(ctx, jid, &waE2E.Message{Conversation: proto.String(p.Content)}); err != nil {
+	resp, err := s.client.SendMessage(ctx, jid, &waE2E.Message{Conversation: proto.String(p.Content)})
+	if err != nil {
 		return err
 	}
+	s.markSelfSent(resp.ID) // para no re-espejar este mensaje cuando vuelva como fromMe
 	s.log.Info("chatwoot: saliente (texto) → WhatsApp", "to", jid.String())
 	return nil
 }

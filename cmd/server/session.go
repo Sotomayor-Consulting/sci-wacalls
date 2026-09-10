@@ -31,6 +31,32 @@ type Session struct {
 
 	mu   sync.Mutex
 	auth AuthSnapshot
+
+	// sentIDs guarda los IDs de mensajes que enviamos nosotros (por Chatwoot),
+	// para no re-espejarlos cuando WhatsApp los devuelve como evento fromMe. Un
+	// fromMe cuyo ID no está aquí vino del aparato (WhatsApp Web) y sí se espeja.
+	sentIDs sync.Map // msgID(string) -> unix ms(int64)
+}
+
+// markSelfSent registra un mensaje enviado por nosotros y poda los viejos (>10m).
+func (s *Session) markSelfSent(id string) {
+	if id == "" {
+		return
+	}
+	now := time.Now().UnixMilli()
+	s.sentIDs.Store(id, now)
+	s.sentIDs.Range(func(k, v any) bool {
+		if ts, ok := v.(int64); ok && now-ts > 10*60*1000 {
+			s.sentIDs.Delete(k)
+		}
+		return true
+	})
+}
+
+// isSelfSent indica si el mensaje lo enviamos nosotros por Chatwoot.
+func (s *Session) isSelfSent(id string) bool {
+	_, ok := s.sentIDs.Load(id)
+	return ok
 }
 
 func newSession(mgr *SessionManager, id, name string, client *whatsmeow.Client) *Session {

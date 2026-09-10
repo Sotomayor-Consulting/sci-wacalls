@@ -152,8 +152,12 @@ func (s *Session) sendChatwootAttachment(ctx context.Context, jid types.JID, att
 	if msg == nil {
 		return fmt.Errorf("tipo de adjunto no soportado: %s", att.FileType)
 	}
-	_, err = s.client.SendMessage(ctx, jid, msg)
-	return err
+	resp, err := s.client.SendMessage(ctx, jid, msg)
+	if err != nil {
+		return err
+	}
+	s.markSelfSent(resp.ID) // para no re-espejar este adjunto cuando vuelva como fromMe
+	return nil
 }
 
 // chatwootFileTypeToMedia mapea el file_type de Chatwoot al MediaType de whatsmeow.
