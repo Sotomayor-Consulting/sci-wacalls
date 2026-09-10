@@ -27,6 +27,16 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/sessions/{sid}/calls/{id}", s.handleEndCall)
 	mux.HandleFunc("GET /api/sessions/{sid}/history", s.handleHistory)
 
+	// Integración Chatwoot (mensajería, Fase 1)
+	mux.HandleFunc("POST /api/sessions/{sid}/chatwoot", s.handleSetChatwoot)
+	mux.HandleFunc("GET /api/sessions/{sid}/chatwoot", s.handleGetChatwoot)
+	mux.HandleFunc("DELETE /api/sessions/{sid}/chatwoot", s.handleDeleteChatwoot)
+	mux.HandleFunc("POST /api/sessions/{sid}/chatwoot/webhook", s.handleChatwootWebhook)
+	mux.HandleFunc("GET /api/chatwoot/resolve", s.handleChatwootResolve)
+
+	// Widget de llamada embebido en Chatwoot (Fase 2)
+	mux.HandleFunc("GET /widget.js", s.handleWidgetJS)
+
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 
 	if s.staticDir != "" {

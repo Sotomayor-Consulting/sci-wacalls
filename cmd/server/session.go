@@ -152,6 +152,8 @@ func (s *Session) handleEvent(rawEvt any) {
 		s.setAuth(AuthSnapshot{State: "open", Paired: true})
 	case *events.LoggedOut:
 		s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
+	case *events.Message:
+		s.handleIncomingMessage(evt)
 	case *events.CallOffer:
 		s.onIncomingOffer(ctx, evt)
 	case *events.CallAccept:

@@ -40,6 +40,9 @@ func newServer(ctx context.Context, dbPath, staticDir string, maxCalls int, log 
 	if err != nil {
 		return nil, err
 	}
+	if err := ensureChatwootTables(ctx, db); err != nil {
+		return nil, err
+	}
 
 	waLogger := waLog.Noop
 	if log.Enabled(ctx, slog.LevelDebug) {
