@@ -17,8 +17,17 @@
 
   var script = document.currentScript;
   var BASE = (script && (script.getAttribute("data-url") || new URL(script.src).origin)) || "";
+  // Clave ACOTADA de widget (WACALLS_WIDGET_KEY), no la maestra: queda visible en
+  // el DOM, así que solo debe autorizar resolver contacto y operar llamadas.
+  var KEY = (script && script.getAttribute("data-api-key")) || "";
   var SAMPLE_RATE = 16000;
   var PCM_LABEL = "pcm";
+
+  function authHeaders(extra) {
+    var h = extra || {};
+    if (KEY) h["X-API-Key"] = KEY;
+    return h;
+  }
 
   // ---------- helpers PCM ----------
   function float32ToInt16LE(f32) {
@@ -59,7 +68,7 @@
 
   // ---------- API ----------
   function apiGet(path) {
-    return fetch(BASE + path, { headers: { "Content-Type": "application/json" } }).then(function (r) {
+    return fetch(BASE + path, { headers: authHeaders({ "Content-Type": "application/json" }) }).then(function (r) {
       if (!r.ok) return r.json().then(function (e) { throw new Error(e.error || r.status); });
       return r.json();
     });
@@ -67,7 +76,7 @@
   function apiPost(path, body) {
     return fetch(BASE + path, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: body ? JSON.stringify(body) : undefined,
     }).then(function (r) {
       if (!r.ok) return r.json().then(function (e) { throw new Error(e.error || r.status); });
@@ -75,7 +84,7 @@
     });
   }
   function apiDelete(path) {
-    return fetch(BASE + path, { method: "DELETE" });
+    return fetch(BASE + path, { method: "DELETE", headers: authHeaders() });
   }
 
   // account_id + conversation_id desde la URL de Chatwoot
