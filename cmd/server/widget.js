@@ -311,28 +311,87 @@
     '19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 ' +
     '2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg>';
 
+  // Selector opcional del contenedor donde anclar el botón, por si el DOM de
+  // Chatwoot cambia: <script ... data-anchor=".conversation--header .actions">.
+  var ANCHOR = (script && script.getAttribute("data-anchor")) || "";
+
+  // findActionsContainer localiza la barra de acciones del header de la
+  // conversación (donde viven "resolver", "más opciones", etc.) para que el
+  // botón de llamada quede junto a los nativos en vez de flotando encima del
+  // editor. Heurística: un botón cuadrado de ~32px en el tercio derecho de la
+  // ventana cuyo padre agrupa entre 2 y 6 botones — esa firma es la barra de
+  // acciones. Devuelve también un hermano del que copiar las clases nativas.
+  function findActionsContainer() {
+    if (ANCHOR) {
+      var a = document.querySelector(ANCHOR);
+      if (a) return { container: a, sibling: a.querySelector("button") };
+    }
+    var btns = document.querySelectorAll("header button, .conversation--header button");
+    if (!btns.length) btns = document.querySelectorAll("button");
+    for (var i = 0; i < btns.length; i++) {
+      var b = btns[i];
+      if (b.id === BTN_ID) continue;
+      var r = b.getBoundingClientRect();
+      var square = r.width >= 26 && r.width <= 44 && r.height >= 26 && r.height <= 44;
+      if (!square || r.left < window.innerWidth * 0.55 || r.top > window.innerHeight * 0.4) continue;
+      var p = b.parentElement;
+      if (!p) continue;
+      var group = p.querySelectorAll(":scope > button");
+      if (group.length >= 2 && group.length <= 6) return { container: p, sibling: b };
+    }
+    return null;
+  }
+
+  var anchorTries = 0;
+
   function ensureButton() {
     // Solo en páginas de conversación.
     if (!currentContext()) {
       var old = document.getElementById(BTN_ID);
       if (old) old.remove();
+      anchorTries = 0;
       return;
     }
     if (document.getElementById(BTN_ID)) return;
 
+    var found = findActionsContainer();
+    // El header de Chatwoot se monta después del primer render; damos margen
+    // antes de caer al botón flotante, para no dejar la llamada inaccesible.
+    if (!found && ++anchorTries < 25) return;
+    if (found && found.container.querySelector("#" + BTN_ID)) return;
+
     var btn = document.createElement("button");
     btn.id = BTN_ID;
+    btn.type = "button";
     btn.title = "Llamar por WhatsApp";
     btn.innerHTML = PHONE_SVG;
-    btn.style.cssText =
-      "position:fixed;right:20px;bottom:80px;z-index:99998;width:48px;height:48px;border:0;border-radius:50%;" +
-      "background:#25D366;color:#fff;box-shadow:0 4px 12px rgba(0,0,0,.2);cursor:pointer;display:flex;" +
-      "align-items:center;justify-content:center;";
-    btn.onclick = beginCall;
-    document.body.appendChild(btn);
+    btn.onclick = function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      beginCall();
+    };
+
+    if (found) {
+      // Hereda las clases del botón vecino para verse nativo en cualquier tema.
+      btn.className = (found.sibling && found.sibling.className) ||
+        "inline-flex items-center justify-center h-8 w-8 p-0 rounded-lg";
+      btn.style.cssText = "color:#25D366;cursor:pointer;";
+      found.container.appendChild(btn);
+    } else {
+      btn.style.cssText =
+        "position:fixed;right:20px;bottom:80px;z-index:99998;width:48px;height:48px;border:0;border-radius:50%;" +
+        "background:#25D366;color:#fff;box-shadow:0 4px 12px rgba(0,0,0,.2);cursor:pointer;display:flex;" +
+        "align-items:center;justify-content:center;";
+      document.body.appendChild(btn);
+    }
   }
 
   var obs = new MutationObserver(function () { ensureButton(); });
   obs.observe(document.body, { childList: true, subtree: true });
-  ensureButton();
+  // La URL cambia al saltar de conversación sin que el DOM mute siempre, y el
+  // header puede remontarse: reintentamos un rato tras la carga.
+  (function retry(n) {
+    ensureButton();
+    if (n < 40) setTimeout(function () { retry(n + 1); }, 800);
+  })(0);
 })();
