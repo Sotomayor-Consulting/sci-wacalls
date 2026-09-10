@@ -27,6 +27,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// cwChatIDAttr es el custom attribute del contacto de Chatwoot donde guardamos
+// el JID de WhatsApp del chat. Es la fuente autoritativa para rutear el saliente
+// (más robusto que reconstruir desde phone_number, que falta en contactos LID).
+const cwChatIDAttr = "wacalls_chat_id"
+
 // ChatwootConfig es la conexión de una sesión con una cuenta+inbox de Chatwoot.
 type ChatwootConfig struct {
 	URL             string `json:"url"`
@@ -76,12 +81,17 @@ func (c ChatwootConfig) req(ctx context.Context, method, path string, body any) 
 // handleIncomingMessage empuja un mensaje entrante de WhatsApp a Chatwoot
 // (texto o adjunto). Solo procesa conversaciones 1:1 que no vienen de la propia
 // cuenta (los grupos quedan fuera de alcance: el Inbox B es una línea 1:1).
+// Acepta tanto direccionamiento por teléfono (s.whatsapp.net) como por LID
+// (@lid) — WhatsApp está migrando a LID y muchos entrantes llegan así.
 func (s *Session) handleIncomingMessage(evt *events.Message) {
 	if evt.Info.IsFromMe || evt.Info.IsGroup {
 		return
 	}
-	if evt.Info.Chat.Server != types.DefaultUserServer {
-		return
+	switch evt.Info.Chat.Server {
+	case types.DefaultUserServer, types.HiddenUserServer:
+		// 1:1 por teléfono o por LID — OK
+	default:
+		return // newsletter, broadcast, grupo, etc.
 	}
 	text := messageText(evt.Message)
 	media, hasMedia := extractIncomingMedia(evt.Message)
@@ -93,10 +103,17 @@ func (s *Session) handleIncomingMessage(evt *events.Message) {
 		return
 	}
 
-	chatID := evt.Info.Chat.String()
+	phone := s.realPhone(evt.Info.MessageSource)
+	if phone == "" {
+		s.log.Warn("chatwoot: no se pudo resolver el teléfono del entrante", "chat", evt.Info.Chat.String())
+		return
+	}
+	// Normalizamos el chatID al JID de teléfono para que entrante y saliente
+	// mapeen a la MISMA conversación de Chatwoot.
+	chatID := phone + "@" + string(types.DefaultUserServer)
 	name := evt.Info.PushName
 	if name == "" {
-		name = evt.Info.Chat.User
+		name = phone
 	}
 
 	convID, err := s.mgr.store.lookupConversation(s.mgr.appCtx, s.id, chatID)
@@ -105,7 +122,7 @@ func (s *Session) handleIncomingMessage(evt *events.Message) {
 		return
 	}
 	if convID == 0 {
-		convID, err = s.ensureChatwootConversation(cfg, chatID, evt.Info.Chat.User, name)
+		convID, err = s.ensureChatwootConversation(cfg, chatID, phone, name)
 		if err != nil {
 			s.log.Error("chatwoot: ensure conversation failed", "err", err)
 			return
@@ -120,12 +137,33 @@ func (s *Session) handleIncomingMessage(evt *events.Message) {
 		}
 		if err := cfg.postAttachment(s.mgr.appCtx, convID, media.caption, media.filename, media.mimetype, data, "incoming"); err != nil {
 			s.log.Error("chatwoot: post incoming attachment failed", "err", err)
+			return
 		}
+		s.log.Info("chatwoot: entrante (media) → Chatwoot", "phone", phone, "conv", convID, "kind", media.kind)
 		return
 	}
 	if err := cfg.postMessage(s.mgr.appCtx, convID, text, "incoming"); err != nil {
 		s.log.Error("chatwoot: post incoming message failed", "err", err)
+		return
 	}
+	s.log.Info("chatwoot: entrante (texto) → Chatwoot", "phone", phone, "conv", convID)
+}
+
+// realPhone devuelve el teléfono real (PN) del remitente de un mensaje 1:1,
+// resolviendo el LID cuando hace falta. Preferencia: Chat si ya es un teléfono,
+// luego SenderAlt (la dirección alternativa que trae whatsmeow), luego el store
+// LID→PN, y por último el número del propio LID como fallback.
+func (s *Session) realPhone(src types.MessageSource) string {
+	if src.Chat.Server == types.DefaultUserServer {
+		return src.Chat.User
+	}
+	if src.SenderAlt.Server == types.DefaultUserServer && src.SenderAlt.User != "" {
+		return src.SenderAlt.User
+	}
+	if pn, err := s.client.Store.LIDs.GetPNForLID(s.mgr.appCtx, src.Chat); err == nil && pn.User != "" {
+		return pn.User
+	}
+	return src.Chat.User
 }
 
 // ensureChatwootConversation crea (una sola vez) el contacto, el contact_inbox y
@@ -160,10 +198,11 @@ func (c ChatwootConfig) ensureContact(ctx context.Context, chatID, phone, name s
 		return id, "", nil
 	}
 	payload := map[string]any{
-		"inbox_id":     c.InboxID,
-		"name":         name,
-		"phone_number": "+" + phone,
-		"identifier":   chatID,
+		"inbox_id":          c.InboxID,
+		"name":              name,
+		"phone_number":      "+" + phone,
+		"identifier":        chatID,
+		"custom_attributes": map[string]any{cwChatIDAttr: chatID},
 	}
 	data, code, err := c.req(ctx, http.MethodPost, "/contacts", payload)
 	if err != nil {
@@ -345,51 +384,66 @@ type chatwootWebhookPayload struct {
 	MessageType  string         `json:"message_type"`
 	Content      string         `json:"content"`
 	Private      bool           `json:"private"`
+	SourceID     string         `json:"source_id"`
 	Attachments  []cwAttachment `json:"attachments"`
 	Conversation struct {
 		Meta struct {
 			Sender struct {
-				PhoneNumber string `json:"phone_number"`
-				Identifier  string `json:"identifier"`
+				PhoneNumber      string         `json:"phone_number"`
+				Identifier       string         `json:"identifier"`
+				CustomAttributes map[string]any `json:"custom_attributes"`
 			} `json:"sender"`
 		} `json:"meta"`
 	} `json:"conversation"`
 }
 
-// recipientPhone extrae el teléfono de destino del webhook (dígitos), o "".
-func recipientPhone(p chatwootWebhookPayload) string {
-	return onlyDigits(firstNonEmpty(p.Conversation.Meta.Sender.PhoneNumber, jidUser(p.Conversation.Meta.Sender.Identifier)))
+// shouldRelay decide si el webhook corresponde a un mensaje nuevo del agente que
+// hay que reenviar a WhatsApp. Solo message_created de tipo outgoing, no privado
+// (las notas privadas no salen) y sin source_id (los que ya vienen de WhatsApp
+// traen source_id → evita el loop).
+func shouldRelay(p chatwootWebhookPayload) bool {
+	return p.Event == "message_created" && p.MessageType == "outgoing" && !p.Private && p.SourceID == ""
 }
 
-// outgoingWhatsAppTarget decide si un evento de webhook SOLO-TEXTO debe
-// reenviarse a WhatsApp y a qué número. Función pura (sin efectos) para poder
-// testearla: solo reenvía mensajes salientes, no privados, con texto y destino.
-func outgoingWhatsAppTarget(p chatwootWebhookPayload) (phone, text string, send bool) {
-	if p.MessageType != "outgoing" || p.Private || strings.TrimSpace(p.Content) == "" {
-		return "", "", false
+// webhookChatID resuelve el destino en WhatsApp desde el webhook, en orden:
+// custom attribute wacalls_chat_id (autoritativo) → identifier (JID) → teléfono.
+func webhookChatID(p chatwootWebhookPayload) string {
+	if v, ok := p.Conversation.Meta.Sender.CustomAttributes[cwChatIDAttr].(string); ok && v != "" {
+		return v
 	}
-	if phone = recipientPhone(p); phone == "" {
-		return "", "", false
+	if id := p.Conversation.Meta.Sender.Identifier; id != "" {
+		return id
 	}
-	return phone, p.Content, true
+	return strings.TrimPrefix(p.Conversation.Meta.Sender.PhoneNumber, "+")
+}
+
+// resolveRecipient convierte un chatID (JID "…@…" o teléfono suelto) en un JID.
+func resolveRecipient(chatID string) (types.JID, error) {
+	if strings.Contains(chatID, "@") {
+		return types.ParseJID(chatID)
+	}
+	d := onlyDigits(chatID)
+	if d == "" {
+		return types.JID{}, fmt.Errorf("destino vacío")
+	}
+	return types.NewJID(d, types.DefaultUserServer), nil
 }
 
 // deliverToWhatsApp envía a WhatsApp un mensaje saliente creado por un agente en
 // Chatwoot (texto y/o adjuntos). Devuelve nil silencioso para los eventos que no
-// corresponde reenviar (entrantes, notas privadas, vacíos).
+// corresponde reenviar (entrantes, notas privadas, ecos, vacíos).
 func (s *Session) deliverToWhatsApp(ctx context.Context, p chatwootWebhookPayload) error {
-	if p.MessageType != "outgoing" || p.Private {
+	if !shouldRelay(p) {
 		return nil
 	}
 	hasText := strings.TrimSpace(p.Content) != ""
 	if len(p.Attachments) == 0 && !hasText {
 		return nil
 	}
-	phone := recipientPhone(p)
-	if phone == "" {
-		return fmt.Errorf("webhook sin teléfono de destino")
+	jid, err := resolveRecipient(webhookChatID(p))
+	if err != nil {
+		return fmt.Errorf("webhook sin destino resoluble: %w", err)
 	}
-	jid := types.NewJID(phone, types.DefaultUserServer)
 
 	if len(p.Attachments) > 0 {
 		for i, att := range p.Attachments {
@@ -401,10 +455,14 @@ func (s *Session) deliverToWhatsApp(ctx context.Context, p chatwootWebhookPayloa
 				return err
 			}
 		}
+		s.log.Info("chatwoot: saliente (media) → WhatsApp", "to", jid.String(), "n", len(p.Attachments))
 		return nil
 	}
-	_, err := s.client.SendMessage(ctx, jid, &waE2E.Message{Conversation: proto.String(p.Content)})
-	return err
+	if _, err := s.client.SendMessage(ctx, jid, &waE2E.Message{Conversation: proto.String(p.Content)}); err != nil {
+		return err
+	}
+	s.log.Info("chatwoot: saliente (texto) → WhatsApp", "to", jid.String())
+	return nil
 }
 
 // ---------- helpers ----------

@@ -178,38 +178,72 @@ func TestCreateConversationAndPostMessage(t *testing.T) {
 
 // --- filtrado del webhook Chatwoot -> WhatsApp ---
 
-func TestOutgoingWhatsAppTarget(t *testing.T) {
-	mk := func(mt, content string, private bool, phone, ident string) chatwootWebhookPayload {
+func TestShouldRelay(t *testing.T) {
+	mk := func(event, mt string, private bool, sourceID string) chatwootWebhookPayload {
 		var p chatwootWebhookPayload
+		p.Event = event
 		p.MessageType = mt
-		p.Content = content
 		p.Private = private
-		p.Conversation.Meta.Sender.PhoneNumber = phone
-		p.Conversation.Meta.Sender.Identifier = ident
+		p.SourceID = sourceID
 		return p
 	}
 	cases := []struct {
-		name      string
-		p         chatwootWebhookPayload
-		wantPhone string
-		wantSend  bool
+		name string
+		p    chatwootWebhookPayload
+		want bool
 	}{
-		{"outgoing con teléfono", mk("outgoing", "hola", false, "+593998175516", ""), "593998175516", true},
-		{"outgoing por identifier", mk("outgoing", "hola", false, "", "593998175516@s.whatsapp.net"), "593998175516", true},
-		{"incoming se ignora", mk("incoming", "hola", false, "+593", ""), "", false},
-		{"nota privada se ignora", mk("outgoing", "nota", true, "+593", ""), "", false},
-		{"sin contenido se ignora", mk("outgoing", "   ", false, "+593", ""), "", false},
-		{"sin destino se ignora", mk("outgoing", "hola", false, "", ""), "", false},
+		{"outgoing nuevo", mk("message_created", "outgoing", false, ""), true},
+		{"incoming se ignora", mk("message_created", "incoming", false, ""), false},
+		{"nota privada se ignora", mk("message_created", "outgoing", true, ""), false},
+		{"con source_id (eco) se ignora", mk("message_created", "outgoing", false, "ABC123"), false},
+		{"conversation_updated se ignora", mk("conversation_updated", "outgoing", false, ""), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			phone, text, send := outgoingWhatsAppTarget(tc.p)
-			if send != tc.wantSend || phone != tc.wantPhone {
-				t.Fatalf("phone=%q text=%q send=%v; quería phone=%q send=%v", phone, text, send, tc.wantPhone, tc.wantSend)
-			}
-			if send && text != tc.p.Content {
-				t.Fatalf("text=%q; quería %q", text, tc.p.Content)
+			if got := shouldRelay(tc.p); got != tc.want {
+				t.Fatalf("shouldRelay = %v; quería %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestWebhookChatID(t *testing.T) {
+	mk := func(phone, ident string, custom map[string]any) chatwootWebhookPayload {
+		var p chatwootWebhookPayload
+		p.Conversation.Meta.Sender.PhoneNumber = phone
+		p.Conversation.Meta.Sender.Identifier = ident
+		p.Conversation.Meta.Sender.CustomAttributes = custom
+		return p
+	}
+	// prioridad: custom attribute wacalls_chat_id
+	if got := webhookChatID(mk("+593", "id@lid", map[string]any{cwChatIDAttr: "593998175516@s.whatsapp.net"})); got != "593998175516@s.whatsapp.net" {
+		t.Fatalf("custom attr: %q", got)
+	}
+	// luego identifier
+	if got := webhookChatID(mk("+593", "120@g.us", nil)); got != "120@g.us" {
+		t.Fatalf("identifier: %q", got)
+	}
+	// luego teléfono (sin +)
+	if got := webhookChatID(mk("+593998175516", "", nil)); got != "593998175516" {
+		t.Fatalf("phone: %q", got)
+	}
+}
+
+func TestResolveRecipient(t *testing.T) {
+	// JID completo se respeta
+	if j, err := resolveRecipient("593998175516@s.whatsapp.net"); err != nil || j.User != "593998175516" || j.Server != "s.whatsapp.net" {
+		t.Fatalf("jid: %v %v", j, err)
+	}
+	// LID se respeta
+	if j, err := resolveRecipient("221543019864111@lid"); err != nil || j.Server != "lid" {
+		t.Fatalf("lid: %v %v", j, err)
+	}
+	// teléfono suelto → s.whatsapp.net
+	if j, err := resolveRecipient("593998175516"); err != nil || j.Server != "s.whatsapp.net" {
+		t.Fatalf("phone: %v %v", j, err)
+	}
+	// vacío → error
+	if _, err := resolveRecipient(""); err == nil {
+		t.Fatal("vacío debería dar error")
 	}
 }
