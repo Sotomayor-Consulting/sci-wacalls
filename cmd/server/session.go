@@ -126,7 +126,19 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 		if ac.bridge == nil {
 			return
 		}
-		_ = ac.bridge.WritePCM(pcm16)
+		// Contamos los frames y solo reportamos el primero y luego cada ~10 s
+		// (16 kHz / 320 muestras ≈ 50 frames/s): si el audio del peer no llega
+		// al navegador queremos verlo en el log, no deducirlo.
+		n := ac.peerFrames.Add(1)
+		err := ac.bridge.WritePCM(pcm16)
+		if n == 1 || n%500 == 0 {
+			s.log.Debug("peer audio → navegador", "call_id", callID, "frames", n, "err", err)
+		}
+		if err != nil {
+			if bad := ac.peerWriteErrs.Add(1); bad == 1 || bad%500 == 0 {
+				s.log.Warn("peer audio: no se pudo escribir al navegador", "call_id", callID, "errores", bad, "err", err)
+			}
+		}
 	}
 }
 

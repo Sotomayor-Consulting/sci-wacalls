@@ -134,18 +134,25 @@
             if (dc.readyState === "open") dc.send(float32ToInt16LE(e.data));
           };
           micSource.connect(capture);
+          // Necesario para que el grafo "tire" del worklet de captura; no hay
+          // eco porque el processor nunca escribe en sus salidas.
           capture.connect(ctx.destination);
 
-          var playback = new AudioWorkletNode(ctx, "playback-processor");
-          var dest = ctx.createMediaStreamDestination();
-          playback.connect(dest);
+          // El nodo de reproducción NO tiene entradas: se alimenta por
+          // postMessage. Hay que declararlo explícitamente — con el default
+          // (numberOfInputs:1) el conteo de canales de salida se deriva de la
+          // entrada, que al no estar conectada es 0, así que outputs[0][0]
+          // queda undefined y el worklet emite silencio para siempre.
+          var playback = new AudioWorkletNode(ctx, "playback-processor", {
+            numberOfInputs: 0,
+            numberOfOutputs: 1,
+            outputChannelCount: [1],
+          });
           dc.onmessage = function (e) { playback.port.postMessage(int16LEToFloat32(e.data)); };
-
-          // reproducir el audio del contacto
-          audioEl = document.createElement("audio");
-          audioEl.autoplay = true;
-          audioEl.srcObject = dest.stream;
-          document.body.appendChild(audioEl);
+          // Directo a los altavoces: un MediaStreamDestination + <audio> añade
+          // un remuestreo (el contexto va a 16 kHz) y la política de autoplay,
+          // dos formas silenciosas de perder el audio del contacto.
+          playback.connect(ctx.destination);
 
           return pc.createOffer();
         });
