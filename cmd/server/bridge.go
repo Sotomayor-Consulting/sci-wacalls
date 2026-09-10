@@ -2,12 +2,69 @@ package main
 
 import (
 	"log/slog"
+	"net"
 	"sync/atomic"
 
 	"wacalls/internal/voip/media"
 
+	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
 )
+
+// mediaAPI es la API de pion configurada para NAT (IP pública anunciada + puerto
+// UDP fijo). nil = comportamiento por defecto de LAN (candidatos efímeros sobre
+// la IP local), que no sirve cuando el navegador está fuera de la red del
+// contenedor. La configura setupWebRTCMedia al arrancar.
+var mediaAPI *webrtc.API
+
+// setupWebRTCMedia hace que pion anuncie publicIP (NAT 1:1) y multiplexe todo el
+// audio WebRTC sobre un único puerto UDP fijo (publicable en Docker/firewall).
+// Sin esto, el servidor anuncia la IP interna del contenedor, inalcanzable para
+// el navegador → la llamada se queda "conectando" y no fluye audio.
+func setupWebRTCMedia(publicIP string, udpPort int, log *slog.Logger) error {
+	if udpPort == 0 {
+		udpPort = 50000
+	}
+	mux, err := ice.NewMultiUDPMuxFromPort(udpPort)
+	if err != nil {
+		return err
+	}
+	se := webrtc.SettingEngine{}
+	se.SetICEUDPMux(mux)
+
+	ip := publicIP
+	if ip == "auto" {
+		ip = detectOutboundIP()
+	}
+	if ip != "" {
+		se.SetNAT1To1IPs([]string{ip}, webrtc.ICECandidateTypeHost)
+	}
+	mediaAPI = webrtc.NewAPI(webrtc.WithSettingEngine(se))
+	log.Info("webrtc media configurada", "udp_port", udpPort, "public_ip", ip)
+	return nil
+}
+
+func newPeerConnection() (*webrtc.PeerConnection, error) {
+	if mediaAPI != nil {
+		return mediaAPI.NewPeerConnection(webrtc.Configuration{})
+	}
+	return webrtc.NewPeerConnection(webrtc.Configuration{})
+}
+
+// detectOutboundIP devuelve la IP local usada para salir a internet (para
+// WACALLS_PUBLIC_IP=auto). En Docker sin host-networking suele ser la IP del
+// contenedor, así que en producción conviene fijar la IP pública explícita.
+func detectOutboundIP() string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	if a, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+		return a.IP.String()
+	}
+	return ""
+}
 
 // pcmChannelLabel is the data channel the browser opens to carry raw 16 kHz mono
 // Int16 LE PCM in both directions. The browser side must create it with this label.
@@ -28,7 +85,7 @@ type Bridge struct {
 }
 
 func NewBridge(offerSDP string, log *slog.Logger) (*Bridge, string, error) {
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	pc, err := newPeerConnection()
 	if err != nil {
 		return nil, "", err
 	}

@@ -183,7 +183,23 @@
   }
 
   // ---------- UI ----------
-  var panel, activeCall;
+  var panel, activeCall, durTimer;
+
+  function startDurationTimer() {
+    stopDurationTimer();
+    var start = Date.now();
+    function tick() {
+      var s = Math.floor((Date.now() - start) / 1000);
+      var mm = String(Math.floor(s / 60)).padStart(2, "0");
+      var ss = String(s % 60).padStart(2, "0");
+      setStatus("En llamada · " + mm + ":" + ss);
+    }
+    tick();
+    durTimer = setInterval(tick, 1000);
+  }
+  function stopDurationTimer() {
+    if (durTimer) { clearInterval(durTimer); durTimer = null; }
+  }
 
   function showPanel(name) {
     if (!panel) {
@@ -226,10 +242,10 @@
             r.session_id,
             callId,
             function (state, msg) {
-              if (state === "connected") setStatus("En llamada");
+              if (state === "connected") startDurationTimer();
               else if (state === "error") setStatus("Error: " + (msg || ""));
             },
-            function () { activeCall = null; }
+            function () { activeCall = null; stopDurationTimer(); }
           );
         });
       })
@@ -242,6 +258,7 @@
   function endCall() {
     if (activeCall) activeCall.hangup();
     activeCall = null;
+    stopDurationTimer();
     hidePanel();
   }
 
