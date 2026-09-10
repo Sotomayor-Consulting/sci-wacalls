@@ -187,10 +187,26 @@ func (s *Session) peerPhone(src types.MessageSource) string {
 	if alt.Server == types.DefaultUserServer && alt.User != "" {
 		return alt.User
 	}
-	if pn, err := s.client.Store.LIDs.GetPNForLID(s.mgr.appCtx, src.Chat); err == nil && pn.User != "" {
-		return pn.User
+	return s.realPhone(src.Chat)
+}
+
+// realPhone devuelve el teléfono (PN) de un JID. Los JID de llamadas y de chats
+// migrados llegan como LID (@lid), que no es un número marcable ni el
+// identificador con el que el contacto existe en Chatwoot; en ese caso lo
+// traducimos con el mapa LID->PN del store de whatsmeow.
+func (s *Session) realPhone(jid types.JID) string {
+	if jid.User == "" {
+		return ""
 	}
-	return src.Chat.User
+	if jid.Server == types.DefaultUserServer {
+		return jid.User
+	}
+	if s.client != nil && s.client.Store != nil {
+		if pn, err := s.client.Store.LIDs.GetPNForLID(s.mgr.appCtx, jid); err == nil && pn.User != "" {
+			return pn.User
+		}
+	}
+	return jid.User
 }
 
 // ensureChatwootConversation crea (una sola vez) el contacto, el contact_inbox y

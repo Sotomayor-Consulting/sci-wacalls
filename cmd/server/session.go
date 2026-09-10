@@ -304,7 +304,15 @@ func (s *Session) finalizeRecording(rec *callRecorder, peerJID string) {
 	if !ok || !cfg.valid() {
 		return
 	}
-	phone := onlyDigits(jidUser(peerJID))
+	// El peer de una llamada suele llegar como LID (…@lid): hay que traducirlo a
+	// teléfono para que la nota caiga en la conversación real del contacto y no
+	// cree un contacto nuevo con el número interno del LID.
+	jid, err := resolveRecipient(peerJID)
+	if err != nil {
+		s.log.Warn("recording: peer no resoluble", "peer", peerJID, "err", err)
+		return
+	}
+	phone := onlyDigits(s.realPhone(jid))
 	if phone == "" {
 		s.log.Warn("recording: no se pudo resolver el teléfono del peer", "peer", peerJID)
 		return
@@ -325,8 +333,11 @@ func (s *Session) finalizeRecording(rec *callRecorder, peerJID string) {
 	content := "🎙️ Grabación de llamada · " + fmtDuration(seconds)
 	filename := "llamada-" + time.Now().Format("20060102-150405") + ".wav"
 	if err := cfg.postPrivateNote(s.mgr.appCtx, convID, content, filename, "audio/wav", wav); err != nil {
-		s.log.Error("recording: subir a chatwoot falló", "err", err)
+		s.log.Error("recording: subir a chatwoot falló", "err", err, "conv", convID)
+		return
 	}
+	s.log.Info("recording: nota con grabación creada",
+		"phone", phone, "conv", convID, "seconds", seconds, "bytes", len(wav))
 }
 
 func (s *Session) terminateCall(callID string, reason core.EndCallReason) {

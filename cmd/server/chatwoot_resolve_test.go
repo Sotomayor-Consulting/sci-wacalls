@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"go.mau.fi/whatsmeow/types"
 )
 
 func TestGetConversation(t *testing.T) {
@@ -125,5 +127,21 @@ func TestWidgetServed(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "chatwoot/resolve") {
 		t.Fatal("widget.js no contiene la llamada a resolve")
+	}
+}
+
+// TestRealPhonePN: un JID que ya es teléfono se devuelve tal cual, sin tocar el
+// store (que en este test no existe). La rama LID->PN requiere cliente vivo.
+func TestRealPhonePN(t *testing.T) {
+	s := &Session{}
+	if got := s.realPhone(types.NewJID("5219991112233", types.DefaultUserServer)); got != "5219991112233" {
+		t.Fatalf("PN: %q", got)
+	}
+	if got := s.realPhone(types.JID{}); got != "" {
+		t.Fatalf("JID vacío: %q", got)
+	}
+	// LID sin cliente: cae al fallback (User crudo) en vez de entrar en pánico.
+	if got := s.realPhone(types.NewJID("65266390200563", types.HiddenUserServer)); got != "65266390200563" {
+		t.Fatalf("LID fallback: %q", got)
 	}
 }

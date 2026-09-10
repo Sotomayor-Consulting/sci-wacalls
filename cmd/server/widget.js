@@ -238,15 +238,19 @@
         setStatus("Llamando…");
         return apiPost("/api/sessions/" + r.session_id + "/calls", { phone: r.phone }).then(function (c) {
           var callId = c.call.callId;
+          // WebRTC solo arma el camino de audio navegador↔servidor (ICE). NO
+          // arranca el timer: el audio del cliente recién fluye cuando CONTESTA.
           activeCall = startWebRTCCall(
             r.session_id,
             callId,
             function (state, msg) {
-              if (state === "connected") startDurationTimer();
-              else if (state === "error") setStatus("Error: " + (msg || ""));
+              if (state === "error") setStatus("Error: " + (msg || ""));
             },
-            function () { activeCall = null; stopDurationTimer(); }
+            function () { activeCall = null; stopDurationTimer(); closeCallEvents(); }
           );
+          // El estado REAL de la llamada (suena / contestó / colgó) viene por SSE,
+          // reflejando la señalización de WhatsApp.
+          openCallEvents(callId);
         });
       })
       .catch(function (err) {
@@ -259,7 +263,38 @@
     if (activeCall) activeCall.hangup();
     activeCall = null;
     stopDurationTimer();
+    closeCallEvents();
     hidePanel();
+  }
+
+  // ---------- estado de la llamada por SSE ----------
+  var callES;
+  function openCallEvents(callId) {
+    closeCallEvents();
+    try {
+      var url = BASE + "/api/events" + (KEY ? "?apiKey=" + encodeURIComponent(KEY) : "");
+      callES = new EventSource(url);
+      callES.onmessage = function (e) {
+        var m;
+        try { m = JSON.parse(e.data); } catch (_) { return; }
+        if (!m || m.id !== callId) return;
+        if (m.type === "call-status") {
+          if (m.status === "connected") {
+            if (!durTimer) startDurationTimer(); // el cliente CONTESTÓ
+          } else if (m.status === "ringing") {
+            if (!durTimer) setStatus("Sonando…");
+          } else if (m.status === "ended") {
+            endCall();
+          }
+        } else if (m.type === "call-ended") {
+          endCall();
+        }
+      };
+      callES.onerror = function () { /* reintenta solo; el cierre lo maneja endCall */ };
+    } catch (_) {}
+  }
+  function closeCallEvents() {
+    if (callES) { try { callES.close(); } catch (_) {} callES = null; }
   }
 
   function escapeHTML(s) {
