@@ -28,8 +28,31 @@ func ensureChatwootTables(ctx context.Context, db *sql.DB) error {
 			source_id       TEXT NOT NULL,
 			conversation_id INTEGER NOT NULL,
 			PRIMARY KEY (session_id, wa_chat_id)
+		);
+		CREATE TABLE IF NOT EXISTS session_recording (
+			session_id TEXT PRIMARY KEY,
+			enabled    INTEGER NOT NULL
 		);`)
 	return err
+}
+
+// setRecording activa/desactiva la grabación de llamadas de una sesión.
+func (s *sessionStore) setRecording(ctx context.Context, sessionID string, enabled bool) error {
+	v := 0
+	if enabled {
+		v = 1
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO session_recording (session_id, enabled) VALUES (?, ?)
+		ON CONFLICT(session_id) DO UPDATE SET enabled=excluded.enabled`, sessionID, v)
+	return err
+}
+
+// getRecording indica si la grabación está activada para la sesión.
+func (s *sessionStore) getRecording(ctx context.Context, sessionID string) bool {
+	var v int
+	err := s.db.QueryRowContext(ctx, `SELECT enabled FROM session_recording WHERE session_id = ?`, sessionID).Scan(&v)
+	return err == nil && v == 1
 }
 
 func (s *sessionStore) setChatwoot(ctx context.Context, sessionID string, c ChatwootConfig) error {

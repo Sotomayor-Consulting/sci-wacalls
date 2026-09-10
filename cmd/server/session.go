@@ -50,7 +50,11 @@ func newSession(mgr *SessionManager, id, name string, client *whatsmeow.Client) 
 func (s *Session) createCall(callID string) *call.CallManager {
 	cm := call.NewCallManager(wa.NewSocket(s.client), s.log)
 	s.wireCall(cm, callID)
-	s.reg.add(callID, &activeCall{cm: cm})
+	ac := &activeCall{cm: cm}
+	if s.mgr.store.getRecording(s.mgr.appCtx, s.id) {
+		ac.recorder = newCallRecorder()
+	}
+	s.reg.add(callID, ac)
 	return cm
 }
 
@@ -89,7 +93,11 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 	}
 	cm.OnPeerAudio = func(pcm16 []float32) {
 		ac, ok := s.reg.get(callID)
-		if !ok || ac.bridge == nil {
+		if !ok {
+			return
+		}
+		ac.recorder.writePeer(pcm16) // no-op si nil
+		if ac.bridge == nil {
 			return
 		}
 		_ = ac.bridge.WritePCM(pcm16)
@@ -246,8 +254,52 @@ func (s *Session) removeCall(callID string) {
 	if !ok {
 		return
 	}
+	if ac.recorder != nil {
+		peer := ""
+		if rec, ok := s.mgr.broker.getCall(callID); ok && rec != nil {
+			peer = rec.Peer
+		}
+		go s.finalizeRecording(ac.recorder, peer) // encode + subida son lentos: fuera del teardown
+	}
 	if ac.bridge != nil {
 		ac.bridge.Close()
+	}
+}
+
+// finalizeRecording encoda el WAV de la llamada y lo sube a Chatwoot como nota
+// privada en la conversación del contacto. Silencioso si la llamada fue muy
+// corta, si no hay config de Chatwoot, o si no se resuelve el teléfono.
+func (s *Session) finalizeRecording(rec *callRecorder, peerJID string) {
+	wav, seconds, ok := rec.finishWAV()
+	if !ok {
+		return
+	}
+	cfg, ok := s.mgr.store.getChatwoot(s.mgr.appCtx, s.id)
+	if !ok || !cfg.valid() {
+		return
+	}
+	phone := onlyDigits(jidUser(peerJID))
+	if phone == "" {
+		s.log.Warn("recording: no se pudo resolver el teléfono del peer", "peer", peerJID)
+		return
+	}
+	chatID := phone + "@" + string(types.DefaultUserServer)
+	convID, err := s.mgr.store.lookupConversation(s.mgr.appCtx, s.id, chatID)
+	if err != nil {
+		s.log.Error("recording: lookup conversation failed", "err", err)
+		return
+	}
+	if convID == 0 {
+		convID, err = s.ensureChatwootConversation(cfg, chatID, phone, phone)
+		if err != nil {
+			s.log.Error("recording: ensure conversation failed", "err", err)
+			return
+		}
+	}
+	content := "🎙️ Grabación de llamada · " + fmtDuration(seconds)
+	filename := "llamada-" + time.Now().Format("20060102-150405") + ".wav"
+	if err := cfg.postPrivateNote(s.mgr.appCtx, convID, content, filename, "audio/wav", wav); err != nil {
+		s.log.Error("recording: subir a chatwoot falló", "err", err)
 	}
 }
 

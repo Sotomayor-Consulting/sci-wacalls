@@ -116,6 +116,35 @@ func (s *server) handleChatwootResolve(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusNotFound, map[string]string{"error": "sin sesión para esa conversación"})
 }
 
+// handleSetRecording activa/desactiva la grabación de llamadas de la sesión.
+func (s *server) handleSetRecording(w http.ResponseWriter, r *http.Request) {
+	sess := s.sessionByID(w, r.PathValue("sid"))
+	if sess == nil {
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "enabled requerido"})
+		return
+	}
+	if err := s.sessions.store.setRecording(r.Context(), sess.id, body.Enabled); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": body.Enabled})
+}
+
+// handleGetRecording devuelve el estado del toggle de grabación.
+func (s *server) handleGetRecording(w http.ResponseWriter, r *http.Request) {
+	sess := s.sessionByID(w, r.PathValue("sid"))
+	if sess == nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": s.sessions.store.getRecording(r.Context(), sess.id)})
+}
+
 // redactChatwoot oculta el account_token para no exponerlo en respuestas GET.
 func redactChatwoot(c ChatwootConfig) ChatwootConfig {
 	if c.AccountToken != "" {

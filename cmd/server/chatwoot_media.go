@@ -78,9 +78,23 @@ func mediaFilename(kind, mimetype, stem string) string {
 
 // postAttachment crea un mensaje en Chatwoot con un adjunto (multipart/form-data).
 func (c ChatwootConfig) postAttachment(ctx context.Context, convID int, content, filename, mimetype string, data []byte, dir string) error {
+	return c.postMultipartMessage(ctx, convID, content, filename, mimetype, data, dir, false)
+}
+
+// postPrivateNote sube un adjunto como NOTA PRIVADA (no se reenvía al cliente).
+// Se usa para las grabaciones de llamada.
+func (c ChatwootConfig) postPrivateNote(ctx context.Context, convID int, content, filename, mimetype string, data []byte) error {
+	return c.postMultipartMessage(ctx, convID, content, filename, mimetype, data, "outgoing", true)
+}
+
+// postMultipartMessage crea un mensaje con adjunto en Chatwoot.
+func (c ChatwootConfig) postMultipartMessage(ctx context.Context, convID int, content, filename, mimetype string, data []byte, dir string, private bool) error {
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 	_ = mw.WriteField("message_type", dir)
+	if private {
+		_ = mw.WriteField("private", "true")
+	}
 	if strings.TrimSpace(content) != "" {
 		_ = mw.WriteField("content", content)
 	}
