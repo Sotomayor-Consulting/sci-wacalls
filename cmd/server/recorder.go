@@ -14,8 +14,8 @@ import (
 
 const (
 	recSampleRate = 16000
-	recMinSeconds = 3                             // llamadas muy cortas no generan archivo
-	recMaxSamples = recSampleRate * 60 * 60       // tope de seguridad: 1 h por lado
+	recMinSeconds = 3                       // llamadas muy cortas no generan archivo
+	recMaxSamples = recSampleRate * 60 * 60 // tope de seguridad: 1 h por lado
 )
 
 // callRecorder acumula el audio de una llamada. Los writes vienen de dos

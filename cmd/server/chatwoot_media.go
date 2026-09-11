@@ -226,7 +226,7 @@ func buildOutgoingMedia(fileType, mimetype, filename, caption string, size uint6
 	case "audio":
 		return &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
 			Mimetype: proto.String(mimetype),
-			URL: &up.URL, DirectPath: &up.DirectPath, MediaKey: up.MediaKey,
+			URL:      &up.URL, DirectPath: &up.DirectPath, MediaKey: up.MediaKey,
 			FileEncSHA256: up.FileEncSHA256, FileSHA256: up.FileSHA256, FileLength: &size,
 		}}
 	default: // documento
