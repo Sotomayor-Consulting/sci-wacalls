@@ -191,6 +191,10 @@
 
   // ---------- UI ----------
   var panel, activeCall, durTimer;
+  // Llamada entrante pendiente de contestar: {sessionId, callId, label}.
+  var incoming = null;
+  // ID de la llamada en curso, para filtrar los eventos del SSE compartido.
+  var currentCallId = null;
 
   function startDurationTimer() {
     stopDurationTimer();
@@ -208,7 +212,44 @@
     if (durTimer) { clearInterval(durTimer); durTimer = null; }
   }
 
-  function showPanel(name) {
+  // ---------- timbre de llamada entrante ----------
+  // Pitidos sintetizados con un oscilador: no hay que empaquetar ni servir un
+  // archivo de audio, y el contexto se cierra al dejar de sonar.
+  var ringCtx = null, ringTimer = null;
+  function playRing() {
+    stopRing();
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      ringCtx = new AC();
+      var beep = function () {
+        if (!ringCtx) return;
+        var o = ringCtx.createOscillator(), g = ringCtx.createGain();
+        o.type = "sine";
+        o.frequency.value = 480;
+        o.connect(g);
+        g.connect(ringCtx.destination);
+        var t = ringCtx.currentTime;
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.18, t + 0.05);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.9);
+        o.start(t);
+        o.stop(t + 0.95);
+      };
+      beep();
+      ringTimer = setInterval(beep, 2500);
+    } catch (_) {}
+  }
+  function stopRing() {
+    if (ringTimer) { clearInterval(ringTimer); ringTimer = null; }
+    if (ringCtx) { try { ringCtx.close(); } catch (_) {} ringCtx = null; }
+  }
+
+  var BTN_CSS = "flex:1;padding:8px;border:0;border-radius:8px;color:#fff;font-weight:600;cursor:pointer;";
+
+  // panelShell dibuja el panel flotante (abajo a la derecha) con un título, una
+  // línea de estado y los botones que correspondan al momento de la llamada.
+  function panelShell(title, status, buttonsHTML) {
     if (!panel) {
       panel = document.createElement("div");
       panel.style.cssText =
@@ -219,18 +260,45 @@
     }
     panel.hidden = false;
     panel.innerHTML =
-      '<div style="font-weight:600;margin-bottom:4px">' + escapeHTML(name) + "</div>" +
-      '<div id="wc-status" style="color:#6b7280;margin-bottom:12px">Llamando…</div>' +
-      '<button id="wc-hangup" style="width:100%;padding:8px;border:0;border-radius:8px;background:#ef4444;' +
-      'color:#fff;font-weight:600;cursor:pointer">Colgar</button>';
+      '<div style="font-weight:600;margin-bottom:4px">' + escapeHTML(title) + "</div>" +
+      '<div id="wc-status" style="color:#6b7280;margin-bottom:12px">' + escapeHTML(status) + "</div>" +
+      '<div style="display:flex;gap:8px">' + buttonsHTML + "</div>";
+  }
+
+  function showPanel(name) {
+    panelShell(name, "Llamando…",
+      '<button id="wc-hangup" style="' + BTN_CSS + 'background:#ef4444">Colgar</button>');
     panel.querySelector("#wc-hangup").onclick = endCall;
   }
+
+  function showIncomingPanel(label) {
+    panelShell(label, "Llamada entrante…",
+      '<button id="wc-answer" style="' + BTN_CSS + 'background:#22c55e">Contestar</button>' +
+      '<button id="wc-reject" style="' + BTN_CSS + 'background:#ef4444">Rechazar</button>');
+    panel.querySelector("#wc-answer").onclick = acceptIncoming;
+    panel.querySelector("#wc-reject").onclick = rejectIncoming;
+  }
+
   function setStatus(txt) {
     var el = panel && panel.querySelector("#wc-status");
     if (el) el.textContent = txt;
   }
   function hidePanel() {
     if (panel) panel.hidden = true;
+  }
+
+  // wireCallMedia arma el camino de audio del navegador para una llamada ya
+  // existente (saliente recién creada o entrante ya aceptada).
+  function wireCallMedia(sessionId, callId) {
+    currentCallId = callId;
+    activeCall = startWebRTCCall(
+      sessionId,
+      callId,
+      function (state, msg) {
+        if (state === "error") setStatus("Error: " + (msg || ""));
+      },
+      function () { activeCall = null; stopDurationTimer(); }
+    );
   }
 
   function beginCall() {
@@ -240,24 +308,13 @@
     setStatus("Resolviendo contacto…");
     apiGet("/api/chatwoot/resolve?account_id=" + cx.accountId + "&conversation_id=" + cx.conversationId)
       .then(function (r) {
-        setStatus("Llamando a " + (r.name || r.phone) + "…");
         showPanel(r.name || r.phone);
         setStatus("Llamando…");
         return apiPost("/api/sessions/" + r.session_id + "/calls", { phone: r.phone }).then(function (c) {
-          var callId = c.call.callId;
           // WebRTC solo arma el camino de audio navegador↔servidor (ICE). NO
           // arranca el timer: el audio del cliente recién fluye cuando CONTESTA.
-          activeCall = startWebRTCCall(
-            r.session_id,
-            callId,
-            function (state, msg) {
-              if (state === "error") setStatus("Error: " + (msg || ""));
-            },
-            function () { activeCall = null; stopDurationTimer(); closeCallEvents(); }
-          );
-          // El estado REAL de la llamada (suena / contestó / colgó) viene por SSE,
-          // reflejando la señalización de WhatsApp.
-          openCallEvents(callId);
+          // El estado REAL (suena / contestó / colgó) llega por SSE.
+          wireCallMedia(r.session_id, c.call.callId);
         });
       })
       .catch(function (err) {
@@ -266,42 +323,124 @@
       });
   }
 
+  // acceptIncoming contesta la llamada entrante: avisa a WhatsApp por /accept y
+  // recién entonces arma el audio. Nosotros contestamos, así que el contador
+  // arranca aquí sin esperar el SSE.
+  function acceptIncoming() {
+    var inc = incoming;
+    if (!inc) return;
+    incoming = null;
+    stopRing();
+    showPanel(inc.label);
+    setStatus("Conectando…");
+    apiPost("/api/sessions/" + inc.sessionId + "/calls/" + inc.callId + "/accept", {})
+      .then(function () {
+        wireCallMedia(inc.sessionId, inc.callId);
+        startDurationTimer();
+      })
+      .catch(function (err) {
+        setStatus("No se pudo contestar: " + err.message);
+        apiDelete("/api/sessions/" + inc.sessionId + "/calls/" + inc.callId);
+        setTimeout(hidePanel, 4000);
+      });
+  }
+
+  function rejectIncoming() {
+    var inc = incoming;
+    incoming = null;
+    stopRing();
+    hidePanel();
+    if (inc) {
+      apiPost("/api/sessions/" + inc.sessionId + "/calls/" + inc.callId + "/reject", {})
+        .catch(function () {});
+    }
+  }
+
   function endCall() {
     if (activeCall) activeCall.hangup();
     activeCall = null;
+    currentCallId = null;
     stopDurationTimer();
-    closeCallEvents();
+    stopRing();
     hidePanel();
   }
 
-  // ---------- estado de la llamada por SSE ----------
-  var callES;
-  function openCallEvents(callId) {
-    closeCallEvents();
+  // ---------- eventos por SSE ----------
+  // Un solo EventSource permanente: además del estado de la llamada en curso,
+  // es lo que nos entera de las llamadas ENTRANTES, que pueden llegar en
+  // cualquier momento y no solo mientras hay una llamada abierta.
+  var es = null;
+
+  function connectEvents() {
+    if (es && es.readyState !== 2) return; // 2 = CLOSED
     try {
       var url = BASE + "/api/events" + (KEY ? "?apiKey=" + encodeURIComponent(KEY) : "");
-      callES = new EventSource(url);
-      callES.onmessage = function (e) {
+      es = new EventSource(url);
+      es.onmessage = function (e) {
         var m;
         try { m = JSON.parse(e.data); } catch (_) { return; }
-        if (!m || m.id !== callId) return;
-        if (m.type === "call-status") {
-          if (m.status === "connected") {
-            if (!durTimer) startDurationTimer(); // el cliente CONTESTÓ
-          } else if (m.status === "ringing") {
-            if (!durTimer) setStatus("Sonando…");
-          } else if (m.status === "ended") {
-            endCall();
-          }
-        } else if (m.type === "call-ended") {
-          endCall();
-        }
+        if (m) onEvent(m);
       };
-      callES.onerror = function () { /* reintenta solo; el cierre lo maneja endCall */ };
+      es.onerror = function () { /* EventSource reintenta solo */ };
     } catch (_) {}
   }
-  function closeCallEvents() {
-    if (callES) { try { callES.close(); } catch (_) {} callES = null; }
+
+  // applyStatus refleja en el panel el estado que reporta el backend.
+  function applyStatus(status) {
+    if (status === "connected") {
+      if (!durTimer) startDurationTimer(); // el cliente CONTESTÓ
+    } else if (status === "ringing") {
+      if (!durTimer) setStatus("Sonando…");
+    }
+  }
+
+  function onEvent(m) {
+    var ended = m.type === "call-ended" || (m.type === "call-status" && m.status === "ended");
+
+    // La lista completa llega con cada cambio de estado y nos sirve de red: el
+    // backend emite el call-status de una llamada saliente ANTES de responder
+    // el POST que nos da su id, así que la transición a "connected" puede
+    // ocurrir antes de que sepamos qué id filtrar.
+    if (m.type === "call-list") {
+      if (!currentCallId || !m.calls) return;
+      for (var i = 0; i < m.calls.length; i++) {
+        if (m.calls[i].callId === currentCallId) {
+          applyStatus(m.calls[i].status);
+          return;
+        }
+      }
+      return;
+    }
+
+    // Llamada entrante nueva → timbre + panel para contestar/rechazar.
+    if (m.type === "incoming") {
+      if (activeCall || currentCallId) return;          // ya estamos en llamada
+      if (incoming && incoming.callId === m.id) return; // ya está sonando esta
+      var who = m.phone || m.peer || "desconocido";
+      incoming = {
+        sessionId: m.sessionId,
+        callId: m.id,
+        label: m.name ? m.name + " · " + who : who,
+      };
+      showIncomingPanel(incoming.label);
+      playRing();
+      return;
+    }
+
+    // La entrante se cortó antes de contestar (el cliente desistió).
+    if (incoming && m.id === incoming.callId && ended) {
+      incoming = null;
+      stopRing();
+      hidePanel();
+      return;
+    }
+
+    if (!currentCallId || m.id !== currentCallId) return;
+    if (ended) {
+      endCall();
+      return;
+    }
+    if (m.type === "call-status") applyStatus(m.status);
   }
 
   function escapeHTML(s) {
@@ -401,4 +540,11 @@
     ensureButton();
     if (n < 40) setTimeout(function () { retry(n + 1); }, 800);
   })(0);
+
+  // El SSE queda conectado siempre, no solo durante una llamada: es el canal
+  // por el que llegan las llamadas ENTRANTES. El chequeo periódico lo revive si
+  // el navegador lo dejó cerrado (pestaña suspendida, red caída).
+  connectEvents();
+  setInterval(connectEvents, 5000);
+  console.log("[sci-wacalls] widget cargado. base=" + BASE);
 })();

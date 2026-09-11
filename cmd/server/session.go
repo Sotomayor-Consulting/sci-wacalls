@@ -90,7 +90,9 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 			SessionID: s.id, CallID: c.CallID, Direction: "inbound", Peer: c.PeerJid,
 			StartedAt: time.Now().UnixMilli(), Status: StatusRinging,
 		})
-		s.mgr.broker.emitIncoming(s.id, c.CallID, c.PeerJid)
+		phone, name := s.resolvePeerIdentity(c.PeerJid)
+		s.mgr.broker.emitIncoming(s.id, c.CallID, c.PeerJid, phone, name)
+		s.log.Info("llamada entrante", "call_id", c.CallID, "peer", c.PeerJid, "phone", phone, "name", name)
 	}
 	cm.OnStateChange = func(c *call.CallInfo) {
 		if c.IsEnded() {

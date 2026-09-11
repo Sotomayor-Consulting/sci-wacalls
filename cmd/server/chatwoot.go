@@ -85,6 +85,7 @@ func (c ChatwootConfig) req(ctx context.Context, method, path string, body any) 
 //     Chatwoot): se espeja como NOTA PRIVADA para que el agente vea en Chatwoot
 //     lo que se respondió por fuera. Los mensajes que enviamos por Chatwoot no se
 //     re-espejan (se filtran por isSelfSent).
+//
 // Solo conversaciones 1:1 (los grupos quedan fuera: el Inbox B es una línea 1:1).
 // Acepta teléfono (s.whatsapp.net) y LID (@lid) — WhatsApp está migrando a LID.
 const deviceMirrorPrefix = "📲 Enviado desde WhatsApp:\n"
@@ -566,4 +567,35 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// resolvePeerIdentity traduce el JID crudo de un peer de llamada (que casi
+// siempre llega como LID) al teléfono real y, cuando lo conocemos, al nombre del
+// contacto. Lo usa el evento de llamada entrante: el LID no es mostrable ni
+// marcable, así que sin esto el agente ve un número interno sin sentido.
+func (s *Session) resolvePeerIdentity(jidStr string) (phone, name string) {
+	jid, err := resolveRecipient(jidStr)
+	if err != nil {
+		return "", ""
+	}
+	phone = onlyDigits(s.realPhone(jid))
+	if s.client == nil || s.client.Store == nil {
+		return phone, ""
+	}
+	// Los contactos suelen estar indexados por teléfono (PN), no por LID, así
+	// que probamos ambas claves.
+	lookup := []types.JID{jid}
+	if phone != "" {
+		lookup = append(lookup, types.NewJID(phone, types.DefaultUserServer))
+	}
+	for _, j := range lookup {
+		ci, err := s.client.Store.Contacts.GetContact(s.mgr.appCtx, j)
+		if err != nil || !ci.Found {
+			continue
+		}
+		if n := firstNonEmpty(ci.FullName, ci.PushName, ci.BusinessName); n != "" {
+			return phone, n
+		}
+	}
+	return phone, ""
 }
