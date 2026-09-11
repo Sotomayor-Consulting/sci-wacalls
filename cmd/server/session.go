@@ -90,6 +90,9 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 			SessionID: s.id, CallID: c.CallID, Direction: "inbound", Peer: c.PeerJid,
 			StartedAt: time.Now().UnixMilli(), Status: StatusRinging,
 		})
+		if ac, ok := s.reg.get(c.CallID); ok {
+			ac.inbound = true
+		}
 		phone, name := s.resolvePeerIdentity(c.PeerJid)
 		s.mgr.broker.emitIncoming(s.id, c.CallID, c.PeerJid, phone, name)
 		s.log.Info("llamada entrante", "call_id", c.CallID, "peer", c.PeerJid, "phone", phone, "name", name)
@@ -103,6 +106,11 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 		dir := "outbound"
 		if c.Direction == core.CallDirectionIncoming {
 			dir = "inbound"
+		}
+		if c.StateData.State == core.CallStateActive {
+			if ac, ok := s.reg.get(c.CallID); ok {
+				ac.answered.Store(true)
+			}
 		}
 		existing, _ := s.mgr.broker.getCall(c.CallID)
 		rec := CallRecord{
@@ -294,12 +302,16 @@ func (s *Session) removeCall(callID string) {
 	if !ok {
 		return
 	}
+	peer := ""
+	if rec, ok := s.mgr.broker.getCall(callID); ok && rec != nil {
+		peer = rec.Peer
+	}
 	if ac.recorder != nil {
-		peer := ""
-		if rec, ok := s.mgr.broker.getCall(callID); ok && rec != nil {
-			peer = rec.Peer
-		}
 		go s.finalizeRecording(ac.recorder, peer) // encode + subida son lentos: fuera del teardown
+	}
+	// Entrante que nunca llegó a contestarse: queda como perdida.
+	if peer != "" && ac.inbound && !ac.answered.Load() {
+		go s.noteMissedCall(peer)
 	}
 	if ac.bridge != nil {
 		ac.bridge.Close()
@@ -314,35 +326,9 @@ func (s *Session) finalizeRecording(rec *callRecorder, peerJID string) {
 	if !ok {
 		return
 	}
-	cfg, ok := s.mgr.store.getChatwoot(s.mgr.appCtx, s.id)
-	if !ok || !cfg.valid() {
+	cfg, convID, phone, ok := s.callConversation(peerJID, "recording")
+	if !ok {
 		return
-	}
-	// El peer de una llamada suele llegar como LID (…@lid): hay que traducirlo a
-	// teléfono para que la nota caiga en la conversación real del contacto y no
-	// cree un contacto nuevo con el número interno del LID.
-	jid, err := resolveRecipient(peerJID)
-	if err != nil {
-		s.log.Warn("recording: peer no resoluble", "peer", peerJID, "err", err)
-		return
-	}
-	phone := onlyDigits(s.realPhone(jid))
-	if phone == "" {
-		s.log.Warn("recording: no se pudo resolver el teléfono del peer", "peer", peerJID)
-		return
-	}
-	chatID := phone + "@" + string(types.DefaultUserServer)
-	convID, err := s.mgr.store.lookupConversation(s.mgr.appCtx, s.id, chatID)
-	if err != nil {
-		s.log.Error("recording: lookup conversation failed", "err", err)
-		return
-	}
-	if convID == 0 {
-		convID, err = s.ensureChatwootConversation(cfg, chatID, phone, phone)
-		if err != nil {
-			s.log.Error("recording: ensure conversation failed", "err", err)
-			return
-		}
 	}
 	content := "🎙️ Grabación de llamada · " + fmtDuration(seconds)
 	filename := "llamada-" + time.Now().Format("20060102-150405") + ".wav"
@@ -352,6 +338,58 @@ func (s *Session) finalizeRecording(rec *callRecorder, peerJID string) {
 	}
 	s.log.Info("recording: nota con grabación creada",
 		"phone", phone, "conv", convID, "seconds", seconds, "bytes", len(wav))
+}
+
+// callConversation resuelve la conversación de Chatwoot que corresponde al peer
+// de una llamada, creándola si hace falta. El peer de una llamada casi siempre
+// llega como LID (…@lid): hay que traducirlo a teléfono para que la nota caiga
+// en la conversación real del contacto y no cree un contacto nuevo con el
+// número interno del LID. La etiqueta `what` solo da contexto al log.
+func (s *Session) callConversation(peerJID, what string) (cfg ChatwootConfig, convID int, phone string, ok bool) {
+	cfg, ok = s.mgr.store.getChatwoot(s.mgr.appCtx, s.id)
+	if !ok || !cfg.valid() {
+		return ChatwootConfig{}, 0, "", false
+	}
+	jid, err := resolveRecipient(peerJID)
+	if err != nil {
+		s.log.Warn(what+": peer no resoluble", "peer", peerJID, "err", err)
+		return ChatwootConfig{}, 0, "", false
+	}
+	phone = onlyDigits(s.realPhone(jid))
+	if phone == "" {
+		s.log.Warn(what+": no se pudo resolver el teléfono del peer", "peer", peerJID)
+		return ChatwootConfig{}, 0, "", false
+	}
+	chatID := phone + "@" + string(types.DefaultUserServer)
+	convID, err = s.mgr.store.lookupConversation(s.mgr.appCtx, s.id, chatID)
+	if err != nil {
+		s.log.Error(what+": lookup conversation failed", "err", err)
+		return ChatwootConfig{}, 0, "", false
+	}
+	if convID == 0 {
+		convID, err = s.ensureChatwootConversation(cfg, chatID, phone, phone)
+		if err != nil {
+			s.log.Error(what+": ensure conversation failed", "err", err)
+			return ChatwootConfig{}, 0, "", false
+		}
+	}
+	return cfg, convID, phone, true
+}
+
+// noteMissedCall deja en el chat del contacto una nota privada avisando que
+// llamó y nadie contestó. Sin esto una llamada entrante perdida no queda en
+// ninguna parte: el agente no se enteraría de que el cliente intentó hablar.
+func (s *Session) noteMissedCall(peerJID string) {
+	cfg, convID, phone, ok := s.callConversation(peerJID, "llamada perdida")
+	if !ok {
+		return
+	}
+	content := "📞 Llamada perdida de " + phone + " · " + time.Now().Format("15:04")
+	if err := cfg.postTextNote(s.mgr.appCtx, convID, content); err != nil {
+		s.log.Error("llamada perdida: nota falló", "err", err, "conv", convID)
+		return
+	}
+	s.log.Info("llamada perdida: nota creada", "phone", phone, "conv", convID)
 }
 
 func (s *Session) terminateCall(callID string, reason core.EndCallReason) {

@@ -247,3 +247,29 @@ func TestResolveRecipient(t *testing.T) {
 		t.Fatal("vacío debería dar error")
 	}
 }
+
+// Las notas (espejo del aparato, llamada perdida, grabación) deben ir como
+// private=true: si se postearan como mensaje normal, Chatwoot las reenviaría al
+// cliente por el webhook del inbox API.
+func TestPostTextNoteIsPrivate(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := ChatwootConfig{URL: srv.URL, AccountID: 1, AccountToken: "t", InboxID: 2}
+	if err := cfg.postTextNote(context.Background(), 7, "📞 Llamada perdida de 593999"); err != nil {
+		t.Fatalf("postTextNote: %v", err)
+	}
+	if got["private"] != true {
+		t.Fatalf("private=%v; la nota se reenviaría al cliente", got["private"])
+	}
+	if got["message_type"] != "outgoing" {
+		t.Fatalf("message_type=%v", got["message_type"])
+	}
+	if got["content"] != "📞 Llamada perdida de 593999" {
+		t.Fatalf("content=%v", got["content"])
+	}
+}

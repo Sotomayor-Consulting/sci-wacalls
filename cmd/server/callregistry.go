@@ -16,6 +16,12 @@ type activeCall struct {
 	// llamadas mudas sin adivinar de qué lado se pierde el audio.
 	peerFrames    atomic.Int64
 	peerWriteErrs atomic.Int64
+
+	// inbound marca las llamadas que entraron (las inició el contacto) y
+	// answered si alguien las llegó a contestar: una entrante sin contestar es
+	// una llamada perdida y se anota en el chat.
+	inbound  bool
+	answered atomic.Bool
 }
 
 type callRegistry struct {
