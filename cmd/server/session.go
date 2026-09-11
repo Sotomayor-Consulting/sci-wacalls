@@ -141,7 +141,12 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 		// al navegador queremos verlo en el log, no deducirlo.
 		n := ac.peerFrames.Add(1)
 		err := ac.bridge.WritePCM(pcm16)
-		if n == 1 || n%500 == 0 {
+		if n == 1 {
+			// Una línea por llamada, en Info: es la confirmación de que el audio
+			// del cliente empezó a fluir hacia el navegador. Sin esto hay que
+			// levantar el servidor en modo debug para responder "¿llega o no?".
+			s.log.Info("peer audio → navegador", "call_id", callID, "err", err)
+		} else if n%500 == 0 {
 			s.log.Debug("peer audio → navegador", "call_id", callID, "frames", n, "err", err)
 		}
 		if err != nil {
