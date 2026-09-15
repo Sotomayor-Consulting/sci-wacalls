@@ -64,10 +64,22 @@ func (m *SessionManager) applyChatwootEnv(ctx context.Context) {
 			"token", cfg.AccountToken != "", "inbox_id", cfg.InboxID)
 		return
 	}
-	for _, s := range m.all() {
+	sessions := m.all()
+	// Con UNA sola sesión aplicamos la config sin exigir que el nombre coincida:
+	// el nombre lo elige quien crea la sesión (la UI sugiere "WhatsApp"), y no
+	// hay ambigüedad posible. Antes, un nombre distinto hacía que el bucle no
+	// encontrara nada y la integración quedaba sin configurar SIN avisar.
+	if len(sessions) == 1 && sessions[0].name != name {
+		log.Warn("chatwoot (env): la única sesión tiene otro nombre; se le aplica igual",
+			"sesion_nombre", sessions[0].name, "esperado", name)
+		name = sessions[0].name
+	}
+	matched := 0
+	for _, s := range sessions {
 		if s.name != name {
 			continue
 		}
+		matched++
 		prev, had := m.store.getChatwoot(ctx, s.id)
 		if had && prev == cfg {
 			continue // ya está así: no toquetear el mapeo de conversaciones
@@ -79,6 +91,17 @@ func (m *SessionManager) applyChatwootEnv(ctx context.Context) {
 		log.Info("chatwoot (env): configuración aplicada",
 			"session", s.id, "account_id", cfg.AccountID, "inbox_id", cfg.InboxID,
 			"webhook", webhookHint(s.id), slog.String("nota", "el webhook_url del inbox se configura en Chatwoot"))
+	}
+	// Ninguna sesión coincidió: hay que decirlo. Callarse deja la integración
+	// muda con las variables aparentemente bien puestas — el síntoma es que los
+	// mensajes SALEN (el webhook no usa esta config) pero no ENTRAN.
+	if matched == 0 {
+		nombres := make([]string, 0, len(sessions))
+		for _, s := range sessions {
+			nombres = append(nombres, s.name)
+		}
+		log.Error("chatwoot (env): ninguna sesión coincide con WACALLS_CHATWOOT_SESSION; la integración queda SIN configurar",
+			"esperado", name, "sesiones_existentes", nombres)
 	}
 }
 
