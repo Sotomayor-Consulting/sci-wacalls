@@ -372,7 +372,7 @@ func (s *Session) callConversation(peerJID, what string) (cfg ChatwootConfig, co
 		return ChatwootConfig{}, 0, "", false
 	}
 	if convID == 0 {
-		convID, err = s.ensureChatwootConversation(cfg, chatID, phone, phone)
+		convID, err = s.ensureChatwootConversation(cfg, chatID, phone, phone, "")
 		if err != nil {
 			s.log.Error(what+": ensure conversation failed", "err", err)
 			return ChatwootConfig{}, 0, "", false

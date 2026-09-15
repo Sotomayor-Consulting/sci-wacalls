@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -91,14 +92,14 @@ func (c ChatwootConfig) req(ctx context.Context, method, path string, body any) 
 const deviceMirrorPrefix = "📲 Enviado desde WhatsApp:\n"
 
 func (s *Session) handleIncomingMessage(evt *events.Message) {
-	if evt.Info.IsGroup {
-		return
-	}
-	switch evt.Info.Chat.Server {
-	case types.DefaultUserServer, types.HiddenUserServer:
-		// 1:1 por teléfono o por LID — OK
-	default:
-		return // newsletter, broadcast, grupo, etc.
+	isGroup := evt.Info.Chat.Server == types.GroupServer
+	if !isGroup {
+		switch evt.Info.Chat.Server {
+		case types.DefaultUserServer, types.HiddenUserServer:
+			// 1:1 por teléfono o por LID — OK
+		default:
+			return // newsletter, broadcast, etc.
+		}
 	}
 	own := evt.Info.IsFromMe
 	if own && s.isSelfSent(evt.Info.ID) {
@@ -114,28 +115,18 @@ func (s *Session) handleIncomingMessage(evt *events.Message) {
 		return
 	}
 
-	phone := s.peerPhone(evt.Info.MessageSource)
-	if phone == "" {
-		s.log.Warn("chatwoot: no se pudo resolver el teléfono del par", "chat", evt.Info.Chat.String())
+	t, ok := s.chatTarget(evt, isGroup, own)
+	if !ok {
 		return
 	}
-	// Normalizamos el chatID al JID de teléfono para que entrante y saliente
-	// mapeen a la MISMA conversación de Chatwoot.
-	chatID := phone + "@" + string(types.DefaultUserServer)
-	name := phone
-	if !own {
-		if pn := evt.Info.PushName; pn != "" {
-			name = pn // el PushName de un fromMe es el nuestro, no el del contacto
-		}
-	}
 
-	convID, err := s.mgr.store.lookupConversation(s.mgr.appCtx, s.id, chatID)
+	convID, err := s.mgr.store.lookupConversation(s.mgr.appCtx, s.id, t.chatID)
 	if err != nil {
 		s.log.Error("chatwoot: lookup conversation failed", "err", err)
 		return
 	}
 	if convID == 0 {
-		convID, err = s.ensureChatwootConversation(cfg, chatID, phone, name)
+		convID, err = s.ensureChatwootConversation(cfg, t.chatID, t.phone, t.name, t.avatar)
 		if err != nil {
 			s.log.Error("chatwoot: ensure conversation failed", "err", err)
 			return
@@ -148,30 +139,95 @@ func (s *Session) handleIncomingMessage(evt *events.Message) {
 			s.log.Error("chatwoot: download media failed", "err", err)
 			return
 		}
+		caption := t.prefix + media.caption
 		if own {
-			// espejo del aparato: nota privada con prefijo
-			err = cfg.postPrivateNote(s.mgr.appCtx, convID, deviceMirrorPrefix+media.caption, media.filename, media.mimetype, data)
+			err = cfg.postPrivateNote(s.mgr.appCtx, convID, caption, media.filename, media.mimetype, data)
 		} else {
-			err = cfg.postAttachment(s.mgr.appCtx, convID, media.caption, media.filename, media.mimetype, data, "incoming")
+			err = cfg.postAttachment(s.mgr.appCtx, convID, caption, media.filename, media.mimetype, data, "incoming")
 		}
 		if err != nil {
 			s.log.Error("chatwoot: post attachment failed", "err", err, "own", own)
 			return
 		}
-		s.log.Info("chatwoot: media → Chatwoot", "phone", phone, "conv", convID, "kind", media.kind, "own", own)
+		s.log.Info("chatwoot: media → Chatwoot", "chat", t.chatID, "conv", convID, "kind", media.kind, "own", own, "grupo", isGroup)
 		return
 	}
 
 	if own {
-		err = cfg.postTextNote(s.mgr.appCtx, convID, deviceMirrorPrefix+text)
+		err = cfg.postTextNote(s.mgr.appCtx, convID, t.prefix+text)
 	} else {
-		err = cfg.postMessage(s.mgr.appCtx, convID, text, "incoming")
+		err = cfg.postMessage(s.mgr.appCtx, convID, t.prefix+text, "incoming")
 	}
 	if err != nil {
 		s.log.Error("chatwoot: post message failed", "err", err, "own", own)
 		return
 	}
-	s.log.Info("chatwoot: texto → Chatwoot", "phone", phone, "conv", convID, "own", own)
+	s.log.Info("chatwoot: texto → Chatwoot", "chat", t.chatID, "conv", convID, "own", own, "grupo", isGroup)
+}
+
+// chatTarget describe a quién representa la conversación de Chatwoot.
+type chatTarget struct {
+	chatID string // JID normalizado: teléfono@s.whatsapp.net, o el grupo @g.us
+	phone  string // vacío en grupos: un grupo no tiene teléfono
+	name   string
+	avatar string
+	prefix string // se antepone al mensaje; identifica al autor dentro del grupo
+}
+
+// chatTarget resuelve la identidad de la conversación. En 1:1 el contacto es la
+// persona; en GRUPO el contacto es el grupo y el autor va como prefijo del
+// mensaje, porque una conversación de Chatwoot tiene un solo contacto y en el
+// grupo escriben varios.
+func (s *Session) chatTarget(evt *events.Message, isGroup, own bool) (chatTarget, bool) {
+	if isGroup {
+		t := chatTarget{chatID: evt.Info.Chat.String()}
+		t.name, t.avatar = s.groupIdentity(evt.Info.Chat)
+		author := evt.Info.PushName
+		if own {
+			author = firstNonEmpty(s.client.Store.PushName, "yo")
+			t.prefix = deviceMirrorPrefix + "*" + author + "*:\n"
+		} else {
+			if author == "" {
+				author = s.realPhone(evt.Info.Sender)
+			}
+			t.prefix = "*" + author + "*:\n"
+		}
+		return t, true
+	}
+
+	phone := s.peerPhone(evt.Info.MessageSource)
+	if phone == "" {
+		s.log.Warn("chatwoot: no se pudo resolver el teléfono del par", "chat", evt.Info.Chat.String())
+		return chatTarget{}, false
+	}
+	// Normalizamos el chatID al JID de teléfono para que entrante y saliente
+	// mapeen a la MISMA conversación de Chatwoot.
+	t := chatTarget{
+		chatID: phone + "@" + string(types.DefaultUserServer),
+		phone:  phone,
+		name:   phone,
+	}
+	if !own {
+		if pn := evt.Info.PushName; pn != "" {
+			t.name = pn // el PushName de un fromMe es el nuestro, no el del contacto
+		}
+	} else {
+		t.prefix = deviceMirrorPrefix
+	}
+	return t, true
+}
+
+// groupIdentity devuelve el asunto y la foto del grupo, para que en Chatwoot se
+// reconozca por su nombre y no por el JID. Solo consulta WhatsApp.
+func (s *Session) groupIdentity(group types.JID) (name, avatar string) {
+	name = group.String()
+	if gi, err := s.client.GetGroupInfo(s.mgr.appCtx, group); err == nil && gi.Name != "" {
+		name = gi.Name
+	}
+	if pp, err := s.client.GetProfilePictureInfo(s.mgr.appCtx, group, nil); err == nil && pp != nil {
+		avatar = pp.URL
+	}
+	return name, avatar
 }
 
 // peerPhone devuelve el teléfono real (PN) del OTRO participante del 1:1,
@@ -213,8 +269,8 @@ func (s *Session) realPhone(jid types.JID) string {
 // ensureChatwootConversation crea (una sola vez) el contacto, el contact_inbox y
 // la conversación en Chatwoot para un chat de WhatsApp, y guarda el mapeo local
 // para reusarlo en los mensajes siguientes.
-func (s *Session) ensureChatwootConversation(cfg ChatwootConfig, chatID, phone, name string) (int, error) {
-	contactID, sourceID, err := cfg.ensureContact(s.mgr.appCtx, chatID, phone, name)
+func (s *Session) ensureChatwootConversation(cfg ChatwootConfig, chatID, phone, name, avatar string) (int, error) {
+	contactID, sourceID, err := cfg.ensureContact(s.mgr.appCtx, chatID, phone, name, avatar)
 	if err != nil {
 		return 0, err
 	}
@@ -245,16 +301,23 @@ func (s *Session) ensureChatwootConversation(cfg ChatwootConfig, chatID, phone, 
 // ensureContact busca el contacto por teléfono; si no existe lo crea. Devuelve
 // el id del contacto y, si la respuesta de creación ya lo trae, el source_id del
 // contact_inbox.
-func (c ChatwootConfig) ensureContact(ctx context.Context, chatID, phone, name string) (contactID int, sourceID string, err error) {
-	if id := c.searchContact(ctx, phone); id != 0 {
+func (c ChatwootConfig) ensureContact(ctx context.Context, chatID, phone, name, avatar string) (contactID int, sourceID string, err error) {
+	if id := c.searchContact(ctx, phone, chatID); id != 0 {
 		return id, "", nil
 	}
 	payload := map[string]any{
 		"inbox_id":          c.InboxID,
 		"name":              name,
-		"phone_number":      "+" + phone,
 		"identifier":        chatID,
 		"custom_attributes": map[string]any{cwChatIDAttr: chatID},
+	}
+	// Un GRUPO no tiene teléfono: mandar phone_number vacío (o un "+" solo) hace
+	// que Chatwoot rechace el contacto por formato inválido.
+	if phone != "" {
+		payload["phone_number"] = "+" + phone
+	}
+	if avatar != "" {
+		payload["avatar_url"] = avatar
 	}
 	data, code, err := c.req(ctx, http.MethodPost, "/contacts", payload)
 	if err != nil {
@@ -293,23 +356,39 @@ func (c ChatwootConfig) ensureContact(ctx context.Context, chatID, phone, name s
 }
 
 // searchContact devuelve el id del contacto cuyo teléfono coincide, o 0.
-func (c ChatwootConfig) searchContact(ctx context.Context, phone string) int {
-	data, code, err := c.req(ctx, http.MethodGet, "/contacts/search?q="+phone, nil)
+// searchContact busca el contacto por teléfono y, si no hay (grupos), por el
+// identifier —que es el chatID—. La búsqueda de Chatwoot cubre ambos campos.
+func (c ChatwootConfig) searchContact(ctx context.Context, phone, chatID string) int {
+	q := phone
+	byIdentifier := phone == ""
+	if byIdentifier {
+		q = chatID
+	}
+	if q == "" {
+		return 0
+	}
+	data, code, err := c.req(ctx, http.MethodGet, "/contacts/search?q="+url.QueryEscape(q), nil)
 	if err != nil || code < 200 || code >= 300 {
 		return 0
 	}
 	var out struct {
 		Payload []struct {
-			ID    int    `json:"id"`
-			Phone string `json:"phone_number"`
+			ID         int    `json:"id"`
+			Phone      string `json:"phone_number"`
+			Identifier string `json:"identifier"`
 		} `json:"payload"`
 	}
 	if json.Unmarshal(data, &out) != nil {
 		return 0
 	}
-	want := onlyDigits(phone)
 	for _, ct := range out.Payload {
-		if onlyDigits(ct.Phone) == want {
+		if byIdentifier {
+			if ct.Identifier == chatID {
+				return ct.ID
+			}
+			continue
+		}
+		if onlyDigits(ct.Phone) == onlyDigits(phone) {
 			return ct.ID
 		}
 	}

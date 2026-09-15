@@ -360,7 +360,10 @@
     if (!cx) return;
     showPanel("Llamada");
     setStatus("Resolviendo contacto…");
-    apiGet("/api/chatwoot/resolve?account_id=" + cx.accountId + "&conversation_id=" + cx.conversationId)
+    // Ya resuelto al abrir la conversación: evita una segunda vuelta.
+    var pre = resolved && resolved.phone ? Promise.resolve(resolved)
+      : apiGet("/api/chatwoot/resolve?account_id=" + cx.accountId + "&conversation_id=" + cx.conversationId);
+    pre
       .then(function (r) {
         showPanel(r.name || r.phone);
         setStatus("Llamando…");
@@ -562,6 +565,47 @@
     '19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 ' +
     '2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/></svg>';
 
+  // ---------- ¿esta conversación admite llamada? ----------
+  // El botón solo se inyecta si el contacto tiene teléfono. Un GRUPO no lo
+  // tiene: su "contacto" en Chatwoot es el grupo mismo, así que llamarlo no
+  // tiene sentido y antes el agente se enteraba recién al hacer clic, con un
+  // error. Se resuelve al cambiar de conversación, no en cada mutación del DOM.
+  var callable = false;
+  var boundKey = null;
+  var resolved = null;
+
+  function convKey() {
+    var cx = currentContext();
+    return cx ? cx.accountId + "/" + cx.conversationId : null;
+  }
+
+  function refreshBinding() {
+    var key = convKey();
+    if (key === boundKey) return;
+    boundKey = key;
+    callable = false;
+    resolved = null;
+    removeButton();
+    if (!key) return;
+    var parts = key.split("/");
+    apiGet("/api/chatwoot/resolve?account_id=" + parts[0] + "&conversation_id=" + parts[1])
+      .then(function (r) {
+        if (convKey() !== key) return; // el agente ya cambió de conversación
+        resolved = r;
+        callable = !!(r && r.phone);
+        ensureButton();
+      })
+      .catch(function () {
+        // 422 (grupo o contacto sin teléfono), 404, o sin sesión: no es llamable.
+        if (convKey() === key) callable = false;
+      });
+  }
+
+  function removeButton() {
+    var old = document.getElementById(BTN_ID);
+    if (old) old.remove();
+  }
+
   // Selector opcional del contenedor donde anclar el botón, por si el DOM de
   // Chatwoot cambia: <script ... data-anchor=".conversation--header .actions">.
   var ANCHOR = (script && script.getAttribute("data-anchor")) || "";
@@ -596,10 +640,9 @@
   var anchorTries = 0;
 
   function ensureButton() {
-    // Solo en páginas de conversación.
-    if (!currentContext()) {
-      var old = document.getElementById(BTN_ID);
-      if (old) old.remove();
+    // Solo en conversaciones que admitan llamada (contacto con teléfono).
+    if (!currentContext() || !callable) {
+      removeButton();
       anchorTries = 0;
       return;
     }
@@ -638,6 +681,7 @@
   }
 
   var obs = new MutationObserver(function () {
+    refreshBinding();
     ensureButton();
     // Si la navegación del SPA se llevó el panel durante una llamada, lo
     // devolvemos en el mismo tick en que se lo llevaron.
@@ -647,9 +691,12 @@
   // La URL cambia al saltar de conversación sin que el DOM mute siempre, y el
   // header puede remontarse: reintentamos un rato tras la carga.
   (function retry(n) {
+    refreshBinding();
     ensureButton();
     if (n < 40) setTimeout(function () { retry(n + 1); }, 800);
   })(0);
+  // La URL cambia al saltar de conversación sin que el DOM mute siempre.
+  setInterval(refreshBinding, 1000);
 
   // El SSE queda conectado siempre, no solo durante una llamada: es el canal
   // por el que llegan las llamadas ENTRANTES. El chequeo periódico lo revive si

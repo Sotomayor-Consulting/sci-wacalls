@@ -99,7 +99,7 @@ func TestEnsureContactSearchHit(t *testing.T) {
 	defer srv.Close()
 
 	cfg := ChatwootConfig{URL: srv.URL, AccountID: 2, AccountToken: "t", InboxID: 1}
-	id, src, err := cfg.ensureContact(context.Background(), "593998175516@s.whatsapp.net", "593998175516", "Mary")
+	id, src, err := cfg.ensureContact(context.Background(), "593998175516@s.whatsapp.net", "593998175516", "Mary", "")
 	if err != nil {
 		t.Fatalf("ensureContact: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestEnsureContactCreate(t *testing.T) {
 	defer srv.Close()
 
 	cfg := ChatwootConfig{URL: srv.URL, AccountID: 2, AccountToken: "t", InboxID: 1}
-	id, src, err := cfg.ensureContact(context.Background(), "593@s.whatsapp.net", "593", "X")
+	id, src, err := cfg.ensureContact(context.Background(), "593@s.whatsapp.net", "593", "X", "")
 	if err != nil {
 		t.Fatalf("ensureContact: %v", err)
 	}
@@ -345,5 +345,46 @@ func TestChatwootFromEnv(t *testing.T) {
 	}
 	if cfg.valid() {
 		t.Fatal("sin token no debería ser válida")
+	}
+}
+
+// Un grupo no tiene teléfono: el contacto debe crearse SIN phone_number (que
+// Chatwoot rechazaría) y con el identifier = chatID, que es cómo se lo vuelve a
+// encontrar después.
+func TestEnsureContactGroupSinTelefono(t *testing.T) {
+	var created map[string]any
+	var searchQ string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			searchQ = r.URL.Query().Get("q")
+			w.Write([]byte(`{"payload":[]}`))
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&created)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"payload":{"contact":{"id":77,"contact_inboxes":[{"source_id":"src","inbox":{"id":1}}]}}}`))
+	}))
+	defer srv.Close()
+
+	cfg := ChatwootConfig{URL: srv.URL, AccountID: 1, AccountToken: "t", InboxID: 1}
+	chatID := "120363000000000000@g.us"
+	id, src, err := cfg.ensureContact(context.Background(), chatID, "", "Grupo DAHER", "https://x/av.jpg")
+	if err != nil {
+		t.Fatalf("ensureContact: %v", err)
+	}
+	if id != 77 || src != "src" {
+		t.Fatalf("id=%d src=%q", id, src)
+	}
+	if searchQ != chatID {
+		t.Fatalf("sin teléfono debe buscar por identifier; buscó %q", searchQ)
+	}
+	if _, tiene := created["phone_number"]; tiene {
+		t.Fatalf("no debe mandar phone_number en un grupo: %v", created["phone_number"])
+	}
+	if created["identifier"] != chatID {
+		t.Fatalf("identifier=%v", created["identifier"])
+	}
+	if created["name"] != "Grupo DAHER" || created["avatar_url"] != "https://x/av.jpg" {
+		t.Fatalf("name/avatar mal: %v / %v", created["name"], created["avatar_url"])
 	}
 }
