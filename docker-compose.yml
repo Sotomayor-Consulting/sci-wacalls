@@ -1,0 +1,52 @@
+# Despliegue del motor en Dokploy (o cualquier PaaS con Traefik).
+#
+# Dokploy lo toma por defecto de la raíz del repo, así que no hay que tocar el
+# campo "Compose Path". Para un `docker compose up` a mano, ver deploy/README.md.
+#
+# Dos detalles que no son opcionales y explican la forma de este archivo:
+#
+# 1. El puerto HTTP va con `expose`, NO publicado en el host: el proxy de
+#    Dokploy corre en un contenedor y alcanza al servicio por la red
+#    `dokploy-network`. Publicarlo en 127.0.0.1 lo dejaría inalcanzable para
+#    Traefik y el dominio no funcionaría.
+# 2. El puerto de MEDIOS sí se publica de verdad. El audio es UDP directo
+#    navegador<->motor y Traefik no enruta UDP: sin este mapeo (y sin abrirlo en
+#    el firewall del proveedor) la llamada conecta y no se escucha nada.
+services:
+  wacalls:
+    image: sci-wacalls:dev
+    build: .
+    restart: always
+    environment:
+      - WACALLS_API_KEY=${WACALLS_API_KEY}
+      # Clave ACOTADA para widget.js: queda visible en el DOM de los agentes.
+      # Nunca poner acá la maestra.
+      - WACALLS_WIDGET_KEY=${WACALLS_WIDGET_KEY}
+      - WACALLS_MAX_CALLS=${WACALLS_MAX_CALLS:-8}
+      # IP PÚBLICA del host, no la de Docker: es la que el motor le anuncia al
+      # navegador como destino del audio.
+      - WACALLS_PUBLIC_IP=${WACALLS_PUBLIC_IP}
+      - WACALLS_UDP_PORT=${WACALLS_UDP_PORT:-50000}
+      # Chatwoot: su URL PÚBLICA si está en otra máquina.
+      - WACALLS_CHATWOOT_URL=${WACALLS_CHATWOOT_URL}
+      - WACALLS_CHATWOOT_ACCOUNT_ID=${WACALLS_CHATWOOT_ACCOUNT_ID}
+      - WACALLS_CHATWOOT_TOKEN=${WACALLS_CHATWOOT_TOKEN}
+      - WACALLS_CHATWOOT_INBOX_ID=${WACALLS_CHATWOOT_INBOX_ID}
+      - WACALLS_CHATWOOT_INBOX_IDENTIFIER=${WACALLS_CHATWOOT_INBOX_IDENTIFIER}
+      - WACALLS_CHATWOOT_SESSION=${WACALLS_CHATWOOT_SESSION:-inbox-b}
+    expose:
+      - '8080'
+    ports:
+      - '${WACALLS_UDP_PORT:-50000}:${WACALLS_UDP_PORT:-50000}/udp'
+    volumes:
+      # Sesión de WhatsApp, config de Chatwoot y grabaciones, en un solo SQLite.
+      - wacalls_data:/data
+    networks:
+      - dokploy-network
+
+volumes:
+  wacalls_data:
+
+networks:
+  dokploy-network:
+    external: true

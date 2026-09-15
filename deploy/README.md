@@ -1,7 +1,8 @@
 # Desplegar el motor con Chatwoot en otra máquina
 
-Este compose levanta **solo** el motor. Sirve cuando Chatwoot ya corre en otro
-lugar y lo que hace falta es que el motor tenga **IP pública**.
+El compose está en la **raíz del repo** (`docker-compose.yml`): levanta solo el
+motor, para cuando Chatwoot ya corre en otro lugar y lo que falta es que el
+motor tenga **IP pública**.
 
 ## Por qué la IP pública no es opcional
 
@@ -20,24 +21,32 @@ El puerto HTTP (8080) sí puede ir detrás del proxy del PaaS, y **conviene que
 vaya con TLS**: el navegador no carga `widget.js` por HTTP dentro de una página
 HTTPS (*mixed content*), así que sin certificado el botón de llamada no aparece.
 
-## Pasos
+## En Dokploy
 
-1. **Construir la imagen** (no se publica en ningún registry):
-   ```bash
-   git clone -b feat/chatwoot-integration https://github.com/Sotomayor-Consulting/sci-wacalls
-   cd sci-wacalls && docker build -t sci-wacalls:dev .
-   ```
-   Es un binario Go estático (`CGO_ENABLED=0`): no compila opus ni ffmpeg, y la
-   grabación sale en WAV por eso mismo.
-2. **Configurar** `.env` a partir de [.env.example](.env.example). `WACALLS_CHATWOOT_URL`
-   va con la URL **pública** de Chatwoot, no `http://rails:3000`.
-3. **Levantar**:
-   ```bash
-   docker compose -f docker-compose.vps.yaml up -d
-   ```
-4. **Parear el número** por QR desde la UI del motor. El volumen es nuevo, así
-   que la sesión de WhatsApp no viaja desde otra instalación.
-5. **En Chatwoot**, apuntar dos cosas a este host:
+1. **Create Service → Compose** (no *Application*: los Application se
+   construyen con Dockerfile o Nixpacks y no tienen ruta de compose; si se elige
+   ese tipo, Dokploy trata la ruta como directorio y falla con
+   `cannot create .../.env: Directory nonexistent`).
+2. **Provider Git**: `https://github.com/Sotomayor-Consulting/sci-wacalls`,
+   rama `main`. *Compose Path* puede quedar en su valor por defecto
+   (`./docker-compose.yml`), que es donde está.
+3. **Environment**: pegar las variables de [.env.example](.env.example) con los
+   valores reales. Dokploy las escribe como `.env` junto al compose, y el
+   compose las consume con `${VAR}`.
+4. **Domains**: agregar el dominio del motor apuntando al servicio `wacalls`,
+   puerto **8080**. Hace falta HTTPS: el navegador no carga `widget.js` por HTTP
+   dentro de una página HTTPS. Tras agregar o cambiar un dominio hay que
+   **redesplegar** para que tome efecto.
+5. **Abrir el puerto UDP** (`WACALLS_UDP_PORT`, 50000 por defecto) en el
+   firewall del proveedor. Traefik no enruta UDP, así que este tramo no pasa por
+   el proxy.
+6. **Deploy.** La imagen se construye en el servidor desde el `build: .` del
+   compose — no hay registry. Es un binario Go estático (`CGO_ENABLED=0`): no
+   compila opus ni ffmpeg, y por eso la grabación sale en WAV.
+7. **Parear el número** por QR desde la UI del motor (pide la API key). El
+   volumen es nuevo, así que la sesión de WhatsApp no viaja desde otra
+   instalación.
+8. **En Chatwoot**, apuntar dos cosas a este host:
    - `webhook_url` del inbox API →
      `https://ESTE-HOST/api/sessions/{SESSION_ID}/chatwoot/webhook`
    - `DASHBOARD_SCRIPTS` →
@@ -45,6 +54,13 @@ HTTPS (*mixed content*), así que sin certificado el botón de llamada no aparec
 
    El `{SESSION_ID}` sale de `GET /api/sessions` o del log
    `chatwoot (env): configuración aplicada`, que imprime la ruta completa.
+
+## Con Docker a secas (sin PaaS)
+
+El compose asume el proxy de Dokploy: el 8080 va con `expose` y el servicio se
+engancha a la red externa `dokploy-network`. Sin Dokploy hay que cambiar dos
+cosas: publicar el puerto HTTP (`ports: - "8080:8080"`) y quitar el bloque
+`networks`, o crear esa red con `docker network create dokploy-network`.
 
 ## Configuración de la integración
 
