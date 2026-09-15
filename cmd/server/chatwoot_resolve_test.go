@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -143,5 +144,37 @@ func TestRealPhonePN(t *testing.T) {
 	// LID sin cliente: cae al fallback (User crudo) en vez de entrar en pánico.
 	if got := s.realPhone(types.NewJID("65266390200563", types.HiddenUserServer)); got != "65266390200563" {
 		t.Fatalf("LID fallback: %q", got)
+	}
+}
+
+// La UI nativa no sabe enviar la API key: index.html debe salir con el
+// bootstrap inyectado, y los assets reales sin tocar.
+func TestStaticIndexInjectsAuthBootstrap(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"),
+		[]byte("<html><head><title>WaCalls</title></head><body></body></html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app.js"), []byte("ORIGINAL"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := &server{staticDir: dir}
+	h := srv.staticHandler()
+
+	for _, path := range []string{"/", "/index.html", "/sessions"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if !strings.Contains(rec.Body.String(), "wacallsApiKey") {
+			t.Fatalf("%s: index sin bootstrap de auth", path)
+		}
+		if !strings.Contains(rec.Body.String(), "<title>WaCalls</title>") {
+			t.Fatalf("%s: se perdió el html original", path)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/app.js", nil))
+	if rec.Body.String() != "ORIGINAL" {
+		t.Fatalf("asset modificado: %q", rec.Body.String())
 	}
 }

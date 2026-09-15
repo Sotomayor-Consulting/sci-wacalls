@@ -43,7 +43,7 @@ func (s *server) routes() http.Handler {
 
 	if s.staticDir != "" {
 		if _, err := os.Stat(s.staticDir); err == nil {
-			mux.Handle("/", http.FileServer(http.Dir(s.staticDir)))
+			mux.Handle("/", s.staticHandler())
 		}
 	}
 	return withCORS(s.withAuth(mux))
