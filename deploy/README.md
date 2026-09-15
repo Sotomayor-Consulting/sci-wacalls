@@ -64,6 +64,9 @@ cosas: publicar el puerto HTTP (`ports: - "8080:8080"`) y quitar el bloque
 
 ## Configuración de la integración
 
+La guía completa paso a paso está en
+[docs/chatwoot-desde-cero.md](../docs/chatwoot-desde-cero.md). Resumen:
+
 Con las variables `WACALLS_CHATWOOT_*` el motor aplica la config al arrancar, a
 la sesión cuyo **nombre** sea `WACALLS_CHATWOOT_SESSION`. El entorno **manda**
 sobre lo guardado en el SQLite del motor: así cambiar el compose surte efecto y

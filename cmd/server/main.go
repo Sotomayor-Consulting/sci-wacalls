@@ -56,6 +56,7 @@ func main() {
 	// Después de restaurar y antes de servir: así la integración ya está puesta
 	// cuando llegue el primer mensaje.
 	srv.sessions.applyChatwootEnv(ctx)
+	srv.sessions.applyRecordingEnv(ctx)
 
 	httpSrv := &http.Server{Addr: *addr, Handler: srv.routes()}
 	go func() {

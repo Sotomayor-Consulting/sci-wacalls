@@ -142,6 +142,7 @@ func (m *SessionManager) Create(name string) (string, error) {
 	// Una sesión nueva con el nombre configurado hereda la config del entorno:
 	// en un despliegue limpio basta parear el número, sin llamar a la API.
 	m.applyChatwootEnv(m.appCtx)
+	m.applyRecordingEnv(m.appCtx)
 	m.broker.emitSessionList(m.infos())
 	if err := s.startPairing(m.appCtx); err != nil {
 		m.log.Error("start pairing failed", "session", id, "err", err)

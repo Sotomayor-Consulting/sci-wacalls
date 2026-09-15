@@ -105,6 +105,35 @@ func (m *SessionManager) applyChatwootEnv(ctx context.Context) {
 	}
 }
 
+// applyRecordingEnv aplica WACALLS_RECORDING a las sesiones. Si la variable no
+// está definida NO se toca nada: el toggle por API sigue siendo la fuente de
+// verdad para quien no quiera declararlo en el entorno.
+//
+// Existe porque la grabación, al ser por sesión y solo por API, se perdía de
+// vista en un despliegue nuevo: el volumen arranca vacío, la grabación queda en
+// false y no hay nada en la config que lo delate.
+func (m *SessionManager) applyRecordingEnv(ctx context.Context) {
+	raw := strings.TrimSpace(os.Getenv("WACALLS_RECORDING"))
+	if raw == "" {
+		return
+	}
+	want, err := strconv.ParseBool(raw)
+	if err != nil {
+		m.log.Error("WACALLS_RECORDING: valor no booleano, se ignora", "valor", raw)
+		return
+	}
+	for _, s := range m.all() {
+		if m.store.getRecording(ctx, s.id) == want {
+			continue
+		}
+		if err := m.store.setRecording(ctx, s.id, want); err != nil {
+			m.log.Error("WACALLS_RECORDING: no se pudo guardar", "session", s.id, "err", err)
+			continue
+		}
+		m.log.Info("grabación de llamadas (env)", "session", s.id, "session_name", s.name, "enabled", want)
+	}
+}
+
 // webhookHint devuelve la ruta que hay que poner como webhook_url del inbox API
 // en Chatwoot. Se loguea al aplicar la config porque es el único paso que no se
 // puede automatizar desde acá.
