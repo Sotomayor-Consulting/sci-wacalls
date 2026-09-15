@@ -273,3 +273,77 @@ func TestPostTextNoteIsPrivate(t *testing.T) {
 		t.Fatalf("content=%v", got["content"])
 	}
 }
+
+// Reapuntar la sesión a otro inbox debe invalidar los mapeos chat->conversación:
+// si sobreviven, el motor postea en conversaciones del inbox anterior y Chatwoot
+// responde 404 para siempre.
+func TestSetChatwootClearsStaleConversations(t *testing.T) {
+	st, ctx := newTestStore(t)
+	sid := "s1"
+	old := ChatwootConfig{URL: "http://cw", AccountID: 2, AccountToken: "t", InboxID: 1}
+	if err := st.setChatwoot(ctx, sid, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.saveConversation(ctx, sid, "593999@s.whatsapp.net", 7, "src", 42); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := st.lookupConversation(ctx, sid, "593999@s.whatsapp.net"); got != 42 {
+		t.Fatalf("mapeo no guardado: %d", got)
+	}
+
+	// Mismo inbox: el mapeo se conserva (rotar el token no debe perderlo).
+	same := old
+	same.AccountToken = "t2"
+	if err := st.setChatwoot(ctx, sid, same); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := st.lookupConversation(ctx, sid, "593999@s.whatsapp.net"); got != 42 {
+		t.Fatalf("mapeo perdido al rotar token: %d", got)
+	}
+
+	// Inbox distinto: se invalida.
+	moved := old
+	moved.InboxID = 5
+	if err := st.setChatwoot(ctx, sid, moved); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := st.lookupConversation(ctx, sid, "593999@s.whatsapp.net"); got != 0 {
+		t.Fatalf("mapeo viejo sobrevivió al cambio de inbox: %d", got)
+	}
+}
+
+func TestChatwootFromEnv(t *testing.T) {
+	for _, k := range []string{"WACALLS_CHATWOOT_URL", "WACALLS_CHATWOOT_TOKEN",
+		"WACALLS_CHATWOOT_ACCOUNT_ID", "WACALLS_CHATWOOT_INBOX_ID",
+		"WACALLS_CHATWOOT_INBOX_IDENTIFIER", "WACALLS_CHATWOOT_SESSION"} {
+		t.Setenv(k, "")
+	}
+	if _, name, ok := chatwootFromEnv(); ok || name != defaultChatwootEnvSession {
+		t.Fatalf("sin variables no debería haber config; name=%q ok=%v", name, ok)
+	}
+
+	t.Setenv("WACALLS_CHATWOOT_URL", "http://rails:3000")
+	t.Setenv("WACALLS_CHATWOOT_TOKEN", "tok")
+	t.Setenv("WACALLS_CHATWOOT_ACCOUNT_ID", "2")
+	t.Setenv("WACALLS_CHATWOOT_INBOX_ID", "5")
+	t.Setenv("WACALLS_CHATWOOT_INBOX_IDENTIFIER", "ident")
+	t.Setenv("WACALLS_CHATWOOT_SESSION", "linea-1")
+	cfg, name, ok := chatwootFromEnv()
+	if !ok || name != "linea-1" {
+		t.Fatalf("ok=%v name=%q", ok, name)
+	}
+	if !cfg.valid() || cfg.AccountID != 2 || cfg.InboxID != 5 || cfg.InboxIdentifier != "ident" {
+		t.Fatalf("cfg mal parseada: %+v", cfg)
+	}
+
+	// Config a medias: se detecta como presente pero inválida, para poder
+	// reportarla en vez de escribir algo que rompa la integración en silencio.
+	t.Setenv("WACALLS_CHATWOOT_TOKEN", "")
+	cfg, _, ok = chatwootFromEnv()
+	if !ok {
+		t.Fatal("con algunas variables puestas debe reportarse presente")
+	}
+	if cfg.valid() {
+		t.Fatal("sin token no debería ser válida")
+	}
+}

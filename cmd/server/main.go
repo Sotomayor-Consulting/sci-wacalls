@@ -53,6 +53,9 @@ func main() {
 		log.Error("session restore failed", "err", err)
 		os.Exit(1)
 	}
+	// Después de restaurar y antes de servir: así la integración ya está puesta
+	// cuando llegue el primer mensaje.
+	srv.sessions.applyChatwootEnv(ctx)
 
 	httpSrv := &http.Server{Addr: *addr, Handler: srv.routes()}
 	go func() {

@@ -224,9 +224,17 @@ func (s *Session) ensureChatwootConversation(cfg ChatwootConfig, chatID, phone, 
 			return 0, err
 		}
 	}
-	convID, err := cfg.createConversation(s.mgr.appCtx, sourceID)
-	if err != nil {
-		return 0, err
+	// Reutilizar una conversación abierta del contacto antes de crear otra: sin
+	// esto, si el agente escribió primero (ese camino no guarda mapeo local) o
+	// si se perdió el mapeo, el mensaje entrante abriría una conversación
+	// DUPLICADA y el hilo del cliente quedaría partido en dos.
+	convID := cfg.findOpenConversation(s.mgr.appCtx, contactID)
+	if convID == 0 {
+		var err error
+		convID, err = cfg.createConversation(s.mgr.appCtx, sourceID)
+		if err != nil {
+			return 0, err
+		}
 	}
 	if err := s.mgr.store.saveConversation(s.mgr.appCtx, s.id, chatID, contactID, sourceID, convID); err != nil {
 		return 0, err
@@ -354,8 +362,38 @@ func (c ChatwootConfig) ensureSourceID(ctx context.Context, contactID int) (stri
 }
 
 // createConversation abre una conversación para el contact_inbox dado.
+// findOpenConversation devuelve la conversación viva del contacto en este inbox,
+// o 0 si no hay. Las cerradas (resolved) no se reabren: un mensaje nuevo merece
+// una conversación nueva.
+func (c ChatwootConfig) findOpenConversation(ctx context.Context, contactID int) int {
+	data, code, err := c.req(ctx, http.MethodGet, fmt.Sprintf("/contacts/%d/conversations", contactID), nil)
+	if err != nil || code < 200 || code >= 300 {
+		return 0
+	}
+	var out struct {
+		Payload []struct {
+			ID      int    `json:"id"`
+			InboxID int    `json:"inbox_id"`
+			Status  string `json:"status"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return 0
+	}
+	for _, conv := range out.Payload {
+		if conv.InboxID != c.InboxID {
+			continue
+		}
+		switch conv.Status {
+		case "open", "pending", "snoozed":
+			return conv.ID
+		}
+	}
+	return 0
+}
+
 func (c ChatwootConfig) createConversation(ctx context.Context, sourceID string) (int, error) {
-	payload := map[string]any{"source_id": sourceID, "inbox_id": c.InboxID}
+	payload := map[string]any{"source_id": sourceID, "inbox_id": c.InboxID, "status": "open"}
 	data, code, err := c.req(ctx, http.MethodPost, "/conversations", payload)
 	if err != nil {
 		return 0, err

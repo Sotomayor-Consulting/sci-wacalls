@@ -56,6 +56,16 @@ func (s *sessionStore) getRecording(ctx context.Context, sessionID string) bool 
 }
 
 func (s *sessionStore) setChatwoot(ctx context.Context, sessionID string, c ChatwootConfig) error {
+	// Si la config apunta a otra cuenta u otro inbox, los mapeos guardados
+	// referencian conversaciones que no existen ahí: postear en ellas devuelve
+	// 404 indefinidamente. Se invalidan para que se recreen en el próximo
+	// mensaje.
+	if prev, ok := s.getChatwoot(ctx, sessionID); ok &&
+		(prev.AccountID != c.AccountID || prev.InboxID != c.InboxID || prev.URL != c.URL) {
+		if err := s.clearConversations(ctx, sessionID); err != nil {
+			return err
+		}
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO chatwoot_configs (session_id, url, account_id, account_token, inbox_id, inbox_identifier)
 		VALUES (?, ?, ?, ?, ?, ?)
@@ -80,7 +90,19 @@ func (s *sessionStore) getChatwoot(ctx context.Context, sessionID string) (Chatw
 }
 
 func (s *sessionStore) deleteChatwoot(ctx context.Context, sessionID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM chatwoot_configs WHERE session_id = ?`, sessionID)
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM chatwoot_configs WHERE session_id = ?`, sessionID); err != nil {
+		return err
+	}
+	// Los mapeos chat->conversación pertenecen al inbox que se está quitando:
+	// si sobreviven, una config nueva heredaría conversaciones ajenas.
+	return s.clearConversations(ctx, sessionID)
+}
+
+// clearConversations borra el mapeo local chat de WhatsApp -> conversación de
+// Chatwoot de una sesión. Las conversaciones se vuelven a crear solas en el
+// próximo mensaje.
+func (s *sessionStore) clearConversations(ctx context.Context, sessionID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM chatwoot_conversations WHERE session_id = ?`, sessionID)
 	return err
 }
 

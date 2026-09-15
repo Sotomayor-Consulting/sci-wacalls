@@ -58,6 +58,17 @@ func (m *SessionManager) unregister(id string) {
 	m.mu.Unlock()
 }
 
+// all devuelve las sesiones registradas.
+func (m *SessionManager) all() []*Session {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]*Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		out = append(out, s)
+	}
+	return out
+}
+
 func (m *SessionManager) Get(id string) (*Session, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -128,6 +139,9 @@ func (m *SessionManager) Create(name string) (string, error) {
 	client := whatsmeow.NewClient(device, m.waLogger)
 	s := newSession(m, id, name, client)
 	m.register(s)
+	// Una sesión nueva con el nombre configurado hereda la config del entorno:
+	// en un despliegue limpio basta parear el número, sin llamar a la API.
+	m.applyChatwootEnv(m.appCtx)
 	m.broker.emitSessionList(m.infos())
 	if err := s.startPairing(m.appCtx); err != nil {
 		m.log.Error("start pairing failed", "session", id, "err", err)
