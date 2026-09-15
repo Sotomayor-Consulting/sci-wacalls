@@ -1,0 +1,46 @@
+# Despliegue SOLO del motor de llamadas en el VPS, con Chatwoot quedando donde
+# está (local, publicado por el túnel Cloudflare).
+#
+# Para qué: el audio de las llamadas es UDP directo navegador<->motor y NO pasa
+# por ningún proxy ni túnel. Con el motor en WSL, solo hay audio desde esa
+# máquina; en el VPS hay IP pública y el puerto UDP abierto, así que todos los
+# agentes pueden hablar sin migrar Chatwoot ni su base.
+#
+# La imagen se construye EN EL VPS desde el fork (no hay registry):
+#   git clone -b feat/chatwoot-integration https://github.com/Sotomayor-Consulting/sci-wacalls
+#   cd sci-wacalls && docker build -t sci-wacalls:dev .
+#
+# Requiere en el proveedor: puerto WACALLS_UDP_PORT abierto en el firewall (UDP)
+# y un dominio con TLS apuntando al 8080 por el proxy del PaaS — el navegador
+# carga widget.js desde ahí y una página HTTPS no admite un script HTTP.
+services:
+  wacalls:
+    image: sci-wacalls:dev
+    restart: always
+    environment:
+      - WACALLS_API_KEY=${WACALLS_API_KEY}
+      - WACALLS_WIDGET_KEY=${WACALLS_WIDGET_KEY}
+      - WACALLS_MAX_CALLS=8
+      # IP PÚBLICA del VPS (no la de Docker): es la que el motor le anuncia al
+      # navegador como destino del audio.
+      - WACALLS_PUBLIC_IP=${WACALLS_PUBLIC_IP}
+      - WACALLS_UDP_PORT=${WACALLS_UDP_PORT:-50000}
+      # Chatwoot NO está en esta máquina: acá va su URL pública, no rails:3000.
+      - WACALLS_CHATWOOT_URL=${WACALLS_CHATWOOT_URL}
+      - WACALLS_CHATWOOT_ACCOUNT_ID=${WACALLS_CHATWOOT_ACCOUNT_ID}
+      - WACALLS_CHATWOOT_TOKEN=${WACALLS_CHATWOOT_TOKEN}
+      - WACALLS_CHATWOOT_INBOX_ID=${WACALLS_CHATWOOT_INBOX_ID}
+      - WACALLS_CHATWOOT_INBOX_IDENTIFIER=${WACALLS_CHATWOOT_INBOX_IDENTIFIER}
+      - WACALLS_CHATWOOT_SESSION=${WACALLS_CHATWOOT_SESSION:-inbox-b}
+    ports:
+      # HTTP/API/widget: el proxy del PaaS le pone TLS delante.
+      - '127.0.0.1:8080:8080'
+      # Medios. Bind amplio a propósito: no pasa por el proxy.
+      - '0.0.0.0:${WACALLS_UDP_PORT:-50000}:${WACALLS_UDP_PORT:-50000}/udp'
+    volumes:
+      # Sesión de WhatsApp + config + grabaciones. Al ser un volumen nuevo, hay
+      # que parear el número por QR una vez.
+      - wacalls_data:/data
+
+volumes:
+  wacalls_data:

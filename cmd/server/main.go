@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -30,6 +31,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Media WebRTC: si se configura una IP pública, pion la anuncia (NAT 1:1) y
+	// multiplexa el audio sobre un puerto UDP fijo — necesario cuando el navegador
+	// está fuera de la red del contenedor (Docker/VPS). Sin esto, solo LAN.
+	if ip := os.Getenv("WACALLS_PUBLIC_IP"); ip != "" {
+		port, _ := strconv.Atoi(os.Getenv("WACALLS_UDP_PORT"))
+		if err := setupWebRTCMedia(ip, port, log); err != nil {
+			log.Error("webrtc media setup failed", "err", err)
+			os.Exit(1)
+		}
+	}
+
 	srv, err := newServer(ctx, *dbPath, *staticDir, *maxCalls, log)
 	if err != nil {
 		log.Error("startup failed", "err", err)
@@ -41,6 +53,9 @@ func main() {
 		log.Error("session restore failed", "err", err)
 		os.Exit(1)
 	}
+	// Después de restaurar y antes de servir: así la integración ya está puesta
+	// cuando llegue el primer mensaje.
+	srv.sessions.applyChatwootEnv(ctx)
 
 	httpSrv := &http.Server{Addr: *addr, Handler: srv.routes()}
 	go func() {

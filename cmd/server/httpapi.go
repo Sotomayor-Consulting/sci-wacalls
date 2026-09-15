@@ -27,21 +27,79 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("DELETE /api/sessions/{sid}/calls/{id}", s.handleEndCall)
 	mux.HandleFunc("GET /api/sessions/{sid}/history", s.handleHistory)
 
+	// Integración Chatwoot (mensajería, Fase 1)
+	mux.HandleFunc("POST /api/sessions/{sid}/chatwoot", s.handleSetChatwoot)
+	mux.HandleFunc("GET /api/sessions/{sid}/chatwoot", s.handleGetChatwoot)
+	mux.HandleFunc("DELETE /api/sessions/{sid}/chatwoot", s.handleDeleteChatwoot)
+	mux.HandleFunc("POST /api/sessions/{sid}/chatwoot/webhook", s.handleChatwootWebhook)
+	mux.HandleFunc("GET /api/chatwoot/resolve", s.handleChatwootResolve)
+	mux.HandleFunc("PUT /api/sessions/{sid}/recording", s.handleSetRecording)
+	mux.HandleFunc("GET /api/sessions/{sid}/recording", s.handleGetRecording)
+
+	// Widget de llamada embebido en Chatwoot (Fase 2)
+	mux.HandleFunc("GET /widget.js", s.handleWidgetJS)
+
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 
 	if s.staticDir != "" {
 		if _, err := os.Stat(s.staticDir); err == nil {
-			mux.Handle("/", http.FileServer(http.Dir(s.staticDir)))
+			mux.Handle("/", s.staticHandler())
 		}
 	}
-	return withCORS(mux)
+	return withCORS(s.withAuth(mux))
+}
+
+// withAuth exige una API key en las rutas /api/* cuando s.apiKey está configurada.
+// Sin apiKey no hay auth (comportamiento upstream). La clave maestra da acceso
+// total; la de widget solo a la superficie mínima del botón de llamada. Quedan
+// públicas las rutas no-/api/ (estáticos, /widget.js) y el webhook de Chatwoot
+// (Chatwoot no puede adjuntar la cabecera).
+func (s *server) withAuth(next http.Handler) http.Handler {
+	if s.apiKey == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if !strings.HasPrefix(p, "/api/") || strings.HasSuffix(p, "/chatwoot/webhook") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		key := r.Header.Get("X-API-Key")
+		if key == "" {
+			key = r.URL.Query().Get("apiKey") // EventSource (SSE) no puede setear headers
+		}
+		switch {
+		case key == s.apiKey:
+			next.ServeHTTP(w, r)
+		case s.widgetKey != "" && key == s.widgetKey && widgetAllowed(r):
+			next.ServeHTTP(w, r)
+		default:
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		}
+	})
+}
+
+// widgetAllowed indica si la ruta pertenece a la superficie mínima que la clave
+// de widget autoriza: resolver contacto, stream de eventos y operar llamadas.
+// No abre la gestión de sesiones ni la config de Chatwoot.
+func widgetAllowed(r *http.Request) bool {
+	p := r.URL.Path
+	switch {
+	case r.Method == http.MethodGet && p == "/api/chatwoot/resolve":
+		return true
+	case r.Method == http.MethodGet && p == "/api/events":
+		return true
+	case strings.HasPrefix(p, "/api/sessions/") && strings.Contains(p, "/calls"):
+		return true
+	}
+	return false
 }
 
 func withCORS(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Client-Id")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Client-Id, X-API-Key")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -216,6 +274,7 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 
 	bridge.OnBrowserPCM = func(pcm []float32) {
 		ac.cm.FeedCapturedPCM(pcm)
+		ac.recorder.writeBrowser(pcm) // no-op si nil
 	}
 	bridge.OnTerminalICE = func() {
 		go sess.terminateCall(callID, core.EndCallReasonUserEnded)

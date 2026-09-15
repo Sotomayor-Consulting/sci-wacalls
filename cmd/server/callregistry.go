@@ -2,13 +2,26 @@ package main
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"wacalls/internal/voip/call"
 )
 
 type activeCall struct {
-	cm     *call.CallManager
-	bridge *Bridge
+	cm       *call.CallManager
+	bridge   *Bridge
+	recorder *callRecorder // nil si la sesión no tiene grabación activada
+
+	// Telemetría del audio entrante (peer → navegador), para diagnosticar
+	// llamadas mudas sin adivinar de qué lado se pierde el audio.
+	peerFrames    atomic.Int64
+	peerWriteErrs atomic.Int64
+
+	// inbound marca las llamadas que entraron (las inició el contacto) y
+	// answered si alguien las llegó a contestar: una entrante sin contestar es
+	// una llamada perdida y se anota en el chat.
+	inbound  bool
+	answered atomic.Bool
 }
 
 type callRegistry struct {

@@ -31,6 +31,32 @@ type Session struct {
 
 	mu   sync.Mutex
 	auth AuthSnapshot
+
+	// sentIDs guarda los IDs de mensajes que enviamos nosotros (por Chatwoot),
+	// para no re-espejarlos cuando WhatsApp los devuelve como evento fromMe. Un
+	// fromMe cuyo ID no está aquí vino del aparato (WhatsApp Web) y sí se espeja.
+	sentIDs sync.Map // msgID(string) -> unix ms(int64)
+}
+
+// markSelfSent registra un mensaje enviado por nosotros y poda los viejos (>10m).
+func (s *Session) markSelfSent(id string) {
+	if id == "" {
+		return
+	}
+	now := time.Now().UnixMilli()
+	s.sentIDs.Store(id, now)
+	s.sentIDs.Range(func(k, v any) bool {
+		if ts, ok := v.(int64); ok && now-ts > 10*60*1000 {
+			s.sentIDs.Delete(k)
+		}
+		return true
+	})
+}
+
+// isSelfSent indica si el mensaje lo enviamos nosotros por Chatwoot.
+func (s *Session) isSelfSent(id string) bool {
+	_, ok := s.sentIDs.Load(id)
+	return ok
 }
 
 func newSession(mgr *SessionManager, id, name string, client *whatsmeow.Client) *Session {
@@ -50,7 +76,11 @@ func newSession(mgr *SessionManager, id, name string, client *whatsmeow.Client) 
 func (s *Session) createCall(callID string) *call.CallManager {
 	cm := call.NewCallManager(wa.NewSocket(s.client), s.log)
 	s.wireCall(cm, callID)
-	s.reg.add(callID, &activeCall{cm: cm})
+	ac := &activeCall{cm: cm}
+	if s.mgr.store.getRecording(s.mgr.appCtx, s.id) {
+		ac.recorder = newCallRecorder()
+	}
+	s.reg.add(callID, ac)
 	return cm
 }
 
@@ -60,7 +90,12 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 			SessionID: s.id, CallID: c.CallID, Direction: "inbound", Peer: c.PeerJid,
 			StartedAt: time.Now().UnixMilli(), Status: StatusRinging,
 		})
-		s.mgr.broker.emitIncoming(s.id, c.CallID, c.PeerJid)
+		if ac, ok := s.reg.get(c.CallID); ok {
+			ac.inbound = true
+		}
+		phone, name := s.resolvePeerIdentity(c.PeerJid)
+		s.mgr.broker.emitIncoming(s.id, c.CallID, c.PeerJid, phone, name)
+		s.log.Info("llamada entrante", "call_id", c.CallID, "peer", c.PeerJid, "phone", phone, "name", name)
 	}
 	cm.OnStateChange = func(c *call.CallInfo) {
 		if c.IsEnded() {
@@ -71,6 +106,11 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 		dir := "outbound"
 		if c.Direction == core.CallDirectionIncoming {
 			dir = "inbound"
+		}
+		if c.StateData.State == core.CallStateActive {
+			if ac, ok := s.reg.get(c.CallID); ok {
+				ac.answered.Store(true)
+			}
 		}
 		existing, _ := s.mgr.broker.getCall(c.CallID)
 		rec := CallRecord{
@@ -89,10 +129,31 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 	}
 	cm.OnPeerAudio = func(pcm16 []float32) {
 		ac, ok := s.reg.get(callID)
-		if !ok || ac.bridge == nil {
+		if !ok {
 			return
 		}
-		_ = ac.bridge.WritePCM(pcm16)
+		ac.recorder.writePeer(pcm16) // no-op si nil
+		if ac.bridge == nil {
+			return
+		}
+		// Contamos los frames y solo reportamos el primero y luego cada ~10 s
+		// (16 kHz / 320 muestras ≈ 50 frames/s): si el audio del peer no llega
+		// al navegador queremos verlo en el log, no deducirlo.
+		n := ac.peerFrames.Add(1)
+		err := ac.bridge.WritePCM(pcm16)
+		if n == 1 {
+			// Una línea por llamada, en Info: es la confirmación de que el audio
+			// del cliente empezó a fluir hacia el navegador. Sin esto hay que
+			// levantar el servidor en modo debug para responder "¿llega o no?".
+			s.log.Info("peer audio → navegador", "call_id", callID, "err", err)
+		} else if n%500 == 0 {
+			s.log.Debug("peer audio → navegador", "call_id", callID, "frames", n, "err", err)
+		}
+		if err != nil {
+			if bad := ac.peerWriteErrs.Add(1); bad == 1 || bad%500 == 0 {
+				s.log.Warn("peer audio: no se pudo escribir al navegador", "call_id", callID, "errores", bad, "err", err)
+			}
+		}
 	}
 }
 
@@ -152,6 +213,8 @@ func (s *Session) handleEvent(rawEvt any) {
 		s.setAuth(AuthSnapshot{State: "open", Paired: true})
 	case *events.LoggedOut:
 		s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
+	case *events.Message:
+		s.handleIncomingMessage(evt)
 	case *events.CallOffer:
 		s.onIncomingOffer(ctx, evt)
 	case *events.CallAccept:
@@ -244,9 +307,94 @@ func (s *Session) removeCall(callID string) {
 	if !ok {
 		return
 	}
+	peer := ""
+	if rec, ok := s.mgr.broker.getCall(callID); ok && rec != nil {
+		peer = rec.Peer
+	}
+	if ac.recorder != nil {
+		go s.finalizeRecording(ac.recorder, peer) // encode + subida son lentos: fuera del teardown
+	}
+	// Entrante que nunca llegó a contestarse: queda como perdida.
+	if peer != "" && ac.inbound && !ac.answered.Load() {
+		go s.noteMissedCall(peer)
+	}
 	if ac.bridge != nil {
 		ac.bridge.Close()
 	}
+}
+
+// finalizeRecording encoda el WAV de la llamada y lo sube a Chatwoot como nota
+// privada en la conversación del contacto. Silencioso si la llamada fue muy
+// corta, si no hay config de Chatwoot, o si no se resuelve el teléfono.
+func (s *Session) finalizeRecording(rec *callRecorder, peerJID string) {
+	wav, seconds, ok := rec.finishWAV()
+	if !ok {
+		return
+	}
+	cfg, convID, phone, ok := s.callConversation(peerJID, "recording")
+	if !ok {
+		return
+	}
+	content := "🎙️ Grabación de llamada · " + fmtDuration(seconds)
+	filename := "llamada-" + time.Now().Format("20060102-150405") + ".wav"
+	if err := cfg.postPrivateNote(s.mgr.appCtx, convID, content, filename, "audio/wav", wav); err != nil {
+		s.log.Error("recording: subir a chatwoot falló", "err", err, "conv", convID)
+		return
+	}
+	s.log.Info("recording: nota con grabación creada",
+		"phone", phone, "conv", convID, "seconds", seconds, "bytes", len(wav))
+}
+
+// callConversation resuelve la conversación de Chatwoot que corresponde al peer
+// de una llamada, creándola si hace falta. El peer de una llamada casi siempre
+// llega como LID (…@lid): hay que traducirlo a teléfono para que la nota caiga
+// en la conversación real del contacto y no cree un contacto nuevo con el
+// número interno del LID. La etiqueta `what` solo da contexto al log.
+func (s *Session) callConversation(peerJID, what string) (cfg ChatwootConfig, convID int, phone string, ok bool) {
+	cfg, ok = s.mgr.store.getChatwoot(s.mgr.appCtx, s.id)
+	if !ok || !cfg.valid() {
+		return ChatwootConfig{}, 0, "", false
+	}
+	jid, err := resolveRecipient(peerJID)
+	if err != nil {
+		s.log.Warn(what+": peer no resoluble", "peer", peerJID, "err", err)
+		return ChatwootConfig{}, 0, "", false
+	}
+	phone = onlyDigits(s.realPhone(jid))
+	if phone == "" {
+		s.log.Warn(what+": no se pudo resolver el teléfono del peer", "peer", peerJID)
+		return ChatwootConfig{}, 0, "", false
+	}
+	chatID := phone + "@" + string(types.DefaultUserServer)
+	convID, err = s.mgr.store.lookupConversation(s.mgr.appCtx, s.id, chatID)
+	if err != nil {
+		s.log.Error(what+": lookup conversation failed", "err", err)
+		return ChatwootConfig{}, 0, "", false
+	}
+	if convID == 0 {
+		convID, err = s.ensureChatwootConversation(cfg, chatID, phone, phone)
+		if err != nil {
+			s.log.Error(what+": ensure conversation failed", "err", err)
+			return ChatwootConfig{}, 0, "", false
+		}
+	}
+	return cfg, convID, phone, true
+}
+
+// noteMissedCall deja en el chat del contacto una nota privada avisando que
+// llamó y nadie contestó. Sin esto una llamada entrante perdida no queda en
+// ninguna parte: el agente no se enteraría de que el cliente intentó hablar.
+func (s *Session) noteMissedCall(peerJID string) {
+	cfg, convID, phone, ok := s.callConversation(peerJID, "llamada perdida")
+	if !ok {
+		return
+	}
+	content := "📞 Llamada perdida de " + phone + " · " + time.Now().Format("15:04")
+	if err := cfg.postTextNote(s.mgr.appCtx, convID, content); err != nil {
+		s.log.Error("llamada perdida: nota falló", "err", err, "conv", convID)
+		return
+	}
+	s.log.Info("llamada perdida: nota creada", "phone", phone, "conv", convID)
 }
 
 func (s *Session) terminateCall(callID string, reason core.EndCallReason) {

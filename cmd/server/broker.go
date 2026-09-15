@@ -193,9 +193,14 @@ func (b *Broker) broadcastCallList() {
 	b.broadcast(map[string]any{"type": "call-list", "calls": list})
 }
 
-func (b *Broker) emitIncoming(sessionID, id, peer string) {
+// emitIncoming anuncia una llamada entrante. phone y name vienen ya resueltos
+// por la sesión: el peer crudo suele ser un LID, que no es mostrable ni
+// marcable, así que el cliente necesita el teléfono real para identificar quién
+// llama.
+func (b *Broker) emitIncoming(sessionID, id, peer, phone, name string) {
 	b.broadcast(map[string]any{
-		"type": "incoming", "sessionId": sessionID, "id": id, "peer": peer, "offeredAt": time.Now().UnixMilli(),
+		"type": "incoming", "sessionId": sessionID, "id": id, "peer": peer,
+		"phone": phone, "name": name, "offeredAt": time.Now().UnixMilli(),
 	})
 }
 

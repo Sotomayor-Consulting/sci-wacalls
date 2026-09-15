@@ -1,0 +1,20 @@
+# Artefactos de build y locales — no van al contexto de la imagen.
+.git
+.github
+/server
+*.exe
+*.test
+*.out
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+client/node_modules
+client/dist
+client/.vite
+node_modules
+/dist
+/bin
+/data
+/auth
+*.md

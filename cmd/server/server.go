@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"log/slog"
 
+	"os"
+
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	_ "modernc.org/sqlite"
@@ -15,6 +17,13 @@ type server struct {
 	sessions  *SessionManager
 	log       *slog.Logger
 	staticDir string
+
+	// Autenticación opcional. Si apiKey == "" no hay auth (comportamiento
+	// upstream). apiKey da acceso total; widgetKey solo a la superficie mínima
+	// del widget de llamada (ver widgetAllowed) para no exponer la clave maestra
+	// en el DOM del agente.
+	apiKey    string
+	widgetKey string
 }
 
 func openDB(dbPath string) (*sql.DB, error) {
@@ -40,6 +49,9 @@ func newServer(ctx context.Context, dbPath, staticDir string, maxCalls int, log 
 	if err != nil {
 		return nil, err
 	}
+	if err := ensureChatwootTables(ctx, db); err != nil {
+		return nil, err
+	}
 
 	waLogger := waLog.Noop
 	if log.Enabled(ctx, slog.LevelDebug) {
@@ -50,5 +62,9 @@ func newServer(ctx context.Context, dbPath, staticDir string, maxCalls int, log 
 	mgr := newSessionManager(ctx, container, broker, store, waLogger, log, maxCalls)
 	broker.SnapshotFn = mgr.snapshotEvents
 
-	return &server{broker: broker, sessions: mgr, log: log, staticDir: staticDir}, nil
+	return &server{
+		broker: broker, sessions: mgr, log: log, staticDir: staticDir,
+		apiKey:    os.Getenv("WACALLS_API_KEY"),
+		widgetKey: os.Getenv("WACALLS_WIDGET_KEY"),
+	}, nil
 }
