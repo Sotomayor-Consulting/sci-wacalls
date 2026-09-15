@@ -23,9 +23,29 @@
   var SAMPLE_RATE = 16000;
   var PCM_LABEL = "pcm";
 
+  // Identidad estable de ESTE navegador. El motor la usa para saber quién se
+  // queda con una llamada entrante (setOwner): sin ella todos los agentes son
+  // el mismo cliente ("") y dos personas pueden contestar la misma llamada,
+  // negociando ambas su WebRTC contra ella.
+  var CLIENT_ID = (function () {
+    try {
+      var k = localStorage.getItem("wacallsClientId");
+      if (!k) {
+        k = (window.crypto && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : "cw-" + Date.now() + "-" + Math.random().toString(36).slice(2, 10);
+        localStorage.setItem("wacallsClientId", k);
+      }
+      return k;
+    } catch (_) {
+      return "cw-" + Math.random().toString(36).slice(2, 10);
+    }
+  })();
+
   function authHeaders(extra) {
     var h = extra || {};
     if (KEY) h["X-API-Key"] = KEY;
+    h["X-Client-Id"] = CLIENT_ID;
     return h;
   }
 
@@ -186,6 +206,13 @@
         apiDelete("/api/sessions/" + sid + "/calls/" + callId);
         cleanup();
       },
+      // Silencia el micrófono sin cortar la captura: el worklet sigue leyendo,
+      // pero las pistas deshabilitadas entregan silencio.
+      setMuted: function (muted) {
+        if (!micStream) return false;
+        micStream.getAudioTracks().forEach(function (t) { t.enabled = !muted; });
+        return true;
+      },
     };
   }
 
@@ -279,10 +306,21 @@
       '<div style="display:flex;gap:8px">' + buttonsHTML + "</div>";
   }
 
+  var muted = false;
+
   function showPanel(name) {
     panelShell(name, "Llamando…",
+      '<button id="wc-mute" style="' + BTN_CSS + 'background:#6b7280">Silenciar</button>' +
       '<button id="wc-hangup" style="' + BTN_CSS + 'background:#ef4444">Colgar</button>');
     panel.querySelector("#wc-hangup").onclick = endCall;
+    var mb = panel.querySelector("#wc-mute");
+    mb.onclick = function () {
+      if (!activeCall || !activeCall.setMuted) return;
+      muted = !muted;
+      if (!activeCall.setMuted(muted)) { muted = !muted; return; }
+      mb.textContent = muted ? "Reactivar" : "Silenciar";
+      mb.style.background = muted ? "#e5484d" : "#6b7280";
+    };
   }
 
   function showIncomingPanel(label) {
@@ -355,8 +393,15 @@
         startDurationTimer();
       })
       .catch(function (err) {
-        setStatus("No se pudo contestar: " + err.message);
-        apiDelete("/api/sessions/" + inc.sessionId + "/calls/" + inc.callId);
+        // 409 del motor = otro agente la reclamó primero. No hay que colgar la
+        // llamada en ese caso: la está atendiendo alguien más.
+        var msg = String(err.message || "");
+        if (msg.indexOf("claimed") !== -1 || msg.indexOf("already on a call") !== -1) {
+          setStatus("La atendió otro agente");
+        } else {
+          setStatus("No se pudo contestar: " + msg);
+          apiDelete("/api/sessions/" + inc.sessionId + "/calls/" + inc.callId);
+        }
         setTimeout(hidePanel, 4000);
       });
   }
@@ -383,6 +428,7 @@
     currentCallId = null;
     currentSessionId = null;
     recovered = false;
+    muted = false;
     stopDurationTimer();
     stopRing();
     hidePanel();
@@ -397,7 +443,8 @@
   function connectEvents() {
     if (es && es.readyState !== 2) return; // 2 = CLOSED
     try {
-      var url = BASE + "/api/events" + (KEY ? "?apiKey=" + encodeURIComponent(KEY) : "");
+      var url = BASE + "/api/events?clientId=" + encodeURIComponent(CLIENT_ID) +
+        (KEY ? "&apiKey=" + encodeURIComponent(KEY) : "");
       es = new EventSource(url);
       es.onmessage = function (e) {
         var m;
@@ -470,6 +517,18 @@
       };
       showIncomingPanel(incoming.label);
       playRing();
+      return;
+    }
+
+    // Otro agente se quedó con esta entrante: hay que dejar de sonar, o todos
+    // los navegadores siguen timbrando por una llamada que ya está atendida.
+    if (m.type === "incoming-claimed" && incoming && m.id === incoming.callId) {
+      if (m.owner !== CLIENT_ID) {
+        incoming = null;
+        stopRing();
+        setStatus("Atendida por otro agente");
+        setTimeout(hidePanel, 3000);
+      }
       return;
     }
 
