@@ -613,7 +613,10 @@ func (s *Session) deliverToWhatsApp(ctx context.Context, p chatwootWebhookPayloa
 	if !shouldRelay(p) {
 		return nil
 	}
-	hasText := strings.TrimSpace(p.Content) != ""
+	// Chatwoot compone en Markdown y WhatsApp no lo entiende: sin traducir, un
+	// **negrita** llega con los asteriscos literales.
+	content := chatwootToWhatsApp(p.Content)
+	hasText := strings.TrimSpace(content) != ""
 	if len(p.Attachments) == 0 && !hasText {
 		return nil
 	}
@@ -626,7 +629,7 @@ func (s *Session) deliverToWhatsApp(ctx context.Context, p chatwootWebhookPayloa
 		for i, att := range p.Attachments {
 			caption := ""
 			if i == 0 && hasText {
-				caption = p.Content // el texto acompaña al primer adjunto
+				caption = content // el texto acompaña al primer adjunto
 			}
 			if err := s.sendChatwootAttachment(ctx, jid, att, caption); err != nil {
 				return err
@@ -635,7 +638,7 @@ func (s *Session) deliverToWhatsApp(ctx context.Context, p chatwootWebhookPayloa
 		s.log.Info("chatwoot: saliente (media) → WhatsApp", "to", jid.String(), "n", len(p.Attachments))
 		return nil
 	}
-	resp, err := s.client.SendMessage(ctx, jid, &waE2E.Message{Conversation: proto.String(p.Content)})
+	resp, err := s.client.SendMessage(ctx, jid, &waE2E.Message{Conversation: proto.String(content)})
 	if err != nil {
 		return err
 	}
