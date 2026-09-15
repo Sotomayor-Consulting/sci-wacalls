@@ -195,10 +195,14 @@
   var incoming = null;
   // ID de la llamada en curso, para filtrar los eventos del SSE compartido.
   var currentCallId = null;
+  var currentSessionId = null;
+  // true cuando la llamada venía de antes de recargar la página: la señalización
+  // sigue viva en el motor, pero el audio del navegador se perdió.
+  var recovered = false;
 
-  function startDurationTimer() {
+  function startDurationTimer(startedAt) {
     stopDurationTimer();
-    var start = Date.now();
+    var start = startedAt || Date.now();
     function tick() {
       var s = Math.floor((Date.now() - start) / 1000);
       var mm = String(Math.floor(s / 60)).padStart(2, "0");
@@ -249,6 +253,15 @@
 
   // panelShell dibuja el panel flotante (abajo a la derecha) con un título, una
   // línea de estado y los botones que correspondan al momento de la llamada.
+  // ensurePanelAttached vuelve a colgar el panel del body si lo sacaron de ahí.
+  // Chatwoot es un SPA: al navegar puede barrer nodos que no son suyos, y
+  // conservar la referencia en la variable no alcanza — seguiríamos escribiendo
+  // el estado y el cronómetro en un nodo DESCONECTADO, invisible, mientras la
+  // llamada sigue en curso.
+  function ensurePanelAttached() {
+    if (panel && !panel.isConnected) document.body.appendChild(panel);
+  }
+
   function panelShell(title, status, buttonsHTML) {
     if (!panel) {
       panel = document.createElement("div");
@@ -258,6 +271,7 @@
         "font-family:system-ui,sans-serif;font-size:14px;color:#1f2937;";
       document.body.appendChild(panel);
     }
+    ensurePanelAttached();
     panel.hidden = false;
     panel.innerHTML =
       '<div style="font-weight:600;margin-bottom:4px">' + escapeHTML(title) + "</div>" +
@@ -291,6 +305,8 @@
   // existente (saliente recién creada o entrante ya aceptada).
   function wireCallMedia(sessionId, callId) {
     currentCallId = callId;
+    currentSessionId = sessionId;
+    recovered = false;
     activeCall = startWebRTCCall(
       sessionId,
       callId,
@@ -358,8 +374,15 @@
 
   function endCall() {
     if (activeCall) activeCall.hangup();
+    // Tras recargar la página no hay activeCall que colgar, pero la llamada
+    // sigue viva en el motor: hay que terminarla por API o queda colgada.
+    else if (currentCallId && currentSessionId) {
+      apiDelete("/api/sessions/" + currentSessionId + "/calls/" + currentCallId);
+    }
     activeCall = null;
     currentCallId = null;
+    currentSessionId = null;
+    recovered = false;
     stopDurationTimer();
     stopRing();
     hidePanel();
@@ -387,6 +410,7 @@
 
   // applyStatus refleja en el panel el estado que reporta el backend.
   function applyStatus(status) {
+    if (recovered) return; // el panel ya dice que el audio se perdió
     if (status === "connected") {
       if (!durTimer) startDurationTimer(); // el cliente CONTESTÓ
     } else if (status === "ringing") {
@@ -402,7 +426,29 @@
     // el POST que nos da su id, así que la transición a "connected" puede
     // ocurrir antes de que sepamos qué id filtrar.
     if (m.type === "call-list") {
-      if (!currentCallId || !m.calls) return;
+      if (!m.calls) return;
+      // Sin llamada local pero con una activa en el motor: la página se
+      // recargó en medio de la llamada. Mostramos el panel para que el agente
+      // pueda al menos colgarla, y avisamos que el audio se perdió — dejarla
+      // "en curso" sin más sería mentirle.
+      if (!currentCallId && !incoming) {
+        for (var j = 0; j < m.calls.length; j++) {
+          var c = m.calls[j];
+          if (c.status === "connected" || c.status === "ringing") {
+            currentCallId = c.callId;
+            currentSessionId = c.sessionId;
+            recovered = true;
+            panelShell("Llamada en curso",
+              "Sin audio: se recargó la página",
+              '<button id="wc-hangup" style="' + BTN_CSS + 'background:#ef4444">Colgar</button>');
+            panel.querySelector("#wc-hangup").onclick = endCall;
+            if (c.startedAt) startDurationTimer(c.startedAt);
+            return;
+          }
+        }
+        return;
+      }
+      if (!currentCallId) return;
       for (var i = 0; i < m.calls.length; i++) {
         if (m.calls[i].callId === currentCallId) {
           applyStatus(m.calls[i].status);
@@ -532,7 +578,12 @@
     }
   }
 
-  var obs = new MutationObserver(function () { ensureButton(); });
+  var obs = new MutationObserver(function () {
+    ensureButton();
+    // Si la navegación del SPA se llevó el panel durante una llamada, lo
+    // devolvemos en el mismo tick en que se lo llevaron.
+    if (activeCall || incoming || durTimer) ensurePanelAttached();
+  });
   obs.observe(document.body, { childList: true, subtree: true });
   // La URL cambia al saltar de conversación sin que el DOM mute siempre, y el
   // header puede remontarse: reintentamos un rato tras la carga.
