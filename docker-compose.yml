@@ -1,17 +1,28 @@
-# Despliegue del motor en Dokploy (o cualquier PaaS con Traefik).
+# Despliegue del motor (Dokploy, Coolify, o cualquier PaaS con proxy propio).
 #
-# Dokploy lo toma por defecto de la raíz del repo, así que no hay que tocar el
-# campo "Compose Path". Para un `docker compose up` a mano, ver deploy/README.md.
+# Se toma por defecto de la raíz del repo, así que no hay que tocar el campo
+# "Compose Path". Para un `docker compose up` a mano, ver deploy/README.md.
 #
 # Dos detalles que no son opcionales y explican la forma de este archivo:
 #
-# 1. El puerto HTTP va con `expose`, NO publicado en el host: el proxy de
-#    Dokploy corre en un contenedor y alcanza al servicio por la red
-#    `dokploy-network`. Publicarlo en 127.0.0.1 lo dejaría inalcanzable para
-#    Traefik y el dominio no funcionaría.
+# 1. El puerto HTTP va con `expose`, NO publicado en el host: el proxy del PaaS
+#    corre en un contenedor y alcanza al servicio por su propia red interna.
+#    Publicarlo en 127.0.0.1 lo dejaría inalcanzable para el proxy y el dominio
+#    no funcionaría. SIN esta línea, el síntoma es 404 en el dominio asignado
+#    (ya nos pasó: el proxy no sabe a qué puerto interno enrutar).
 # 2. El puerto de MEDIOS sí se publica de verdad. El audio es UDP directo
-#    navegador<->motor y Traefik no enruta UDP: sin este mapeo (y sin abrirlo en
-#    el firewall del proveedor) la llamada conecta y no se escucha nada.
+#    navegador<->motor y ningún proxy de este tipo enruta UDP: sin este mapeo
+#    (y sin abrirlo en el firewall del proveedor) la llamada conecta y no se
+#    escucha nada.
+#
+# NO se declara una sección `networks:` propia acá. En Dokploy hacía falta
+# unirse a `dokploy-network` (red compartida); en Coolify cada stack vive en su
+# propia red aislada por defecto y Coolify advierte explícitamente que una red
+# custom en el compose causa caídas intermitentes por HTTPS. Para que este
+# servicio hable con el Chatwoot de otro stack en Coolify, conectar las redes
+# desde la UI ("Connect to Predefined Network" en ambos recursos) y usar el
+# nombre COMPLETO del contenedor (con el UUID de Coolify) en
+# WACALLS_CHATWOOT_URL — el nombre corto del servicio no resuelve entre stacks.
 services:
   wacalls:
     image: sci-wacalls:dev
@@ -38,19 +49,13 @@ services:
       # Con el número real de una empresa, revisar el requisito legal de
       # consentimiento antes de ponerlo en true.
       - WACALLS_RECORDING=${WACALLS_RECORDING:-}
-#    expose:
-#      - '8080'
+    expose:
+      - '8080'
     ports:
       - '${WACALLS_UDP_PORT:-50000}:${WACALLS_UDP_PORT:-50000}/udp'
     volumes:
       # Sesión de WhatsApp, config de Chatwoot y grabaciones, en un solo SQLite.
       - wacalls_data:/data
-#    networks:
-#      - dokploy-network
 
 volumes:
   wacalls_data:
-
-#networks:
-#  dokploy-network:
-#    external: true
