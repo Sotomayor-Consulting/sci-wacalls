@@ -38,8 +38,8 @@ services:
       # Con el número real de una empresa, revisar el requisito legal de
       # consentimiento antes de ponerlo en true.
       - WACALLS_RECORDING=${WACALLS_RECORDING:-}
-    expose:
-      - '8080'
+#    expose:
+#      - '8080'
     ports:
       - '${WACALLS_UDP_PORT:-50000}:${WACALLS_UDP_PORT:-50000}/udp'
     volumes:
