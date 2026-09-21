@@ -25,7 +25,15 @@ func setupWebRTCMedia(publicIP string, udpPort int, log *slog.Logger) error {
 	if udpPort == 0 {
 		udpPort = 50000
 	}
-	mux, err := ice.NewMultiUDPMuxFromPort(udpPort)
+	// Solo UDP4: por defecto pion intenta también UDP6, enumerando TODAS las
+	// direcciones de TODAS las interfaces — incluida la IPv6 link-local que
+	// Docker asigna solo en eth0. En algunos hosts (visto en Coolify) el bind a
+	// esa dirección falla con "cannot assign requested address" y tumba la
+	// función ENTERA (un solo error corta el loop), aunque el bind en IPv4 -que
+	// es lo único que se usa, WACALLS_PUBLIC_IP siempre es IPv4- habría andado
+	// bien. main.go trata este error como fatal (os.Exit), así que sin este
+	// filtro el proceso ni siquiera llega a levantar el servidor HTTP.
+	mux, err := ice.NewMultiUDPMuxFromPort(udpPort, ice.UDPMuxFromPortWithNetworks(ice.NetworkTypeUDP4))
 	if err != nil {
 		return err
 	}
