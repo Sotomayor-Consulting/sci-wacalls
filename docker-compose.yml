@@ -45,8 +45,8 @@ services:
     volumes:
       # Sesión de WhatsApp, config de Chatwoot y grabaciones, en un solo SQLite.
       - wacalls_data:/data
-    networks:
-      - dokploy-network
+#    networks:
+#      - dokploy-network
 
 volumes:
   wacalls_data:
