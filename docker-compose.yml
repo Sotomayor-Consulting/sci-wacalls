@@ -51,6 +51,6 @@ services:
 volumes:
   wacalls_data:
 
-networks:
-  dokploy-network:
-    external: true
+#networks:
+#  dokploy-network:
+#    external: true
