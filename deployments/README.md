@@ -7,8 +7,8 @@ timeout, según cuál regla se aplique donde no corresponde.
 
 | | [`dokploy/`](dokploy) | [`coolify/`](coolify) |
 |---|---|---|
-| Red entre recursos | `dokploy-network` declarada en el compose (compartida) | Aislada por stack — **no** declarar `networks:` propia; se conecta desde la UI |
-| Cómo se ven dos recursos | nombre corto del servicio (`rails`) | igual, pero primero activar *Connect to Predefined Network* en los dos |
+| Red entre recursos | `dokploy-network` declarada en el compose (compartida) | `coolify` declarada en el compose (la que ya usa el proxy) |
+| Cómo se ven dos recursos | nombre corto del servicio (`rails`), ambos con `networks: dokploy-network` | nombre corto del servicio, ambos con `networks: coolify` |
 | `expose: 8080` | obligatorio | obligatorio |
 | Puerto de medios (UDP) | publicado de verdad, no vía proxy | publicado de verdad, no vía proxy |
 

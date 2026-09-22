@@ -15,17 +15,25 @@
 #    sin abrirlo en el firewall del proveedor) la llamada conecta y no se
 #    escucha nada, sin error en los logs.
 #
-# NO se declara una sección `networks:` propia acá. A diferencia de Dokploy,
-# en Coolify cada stack vive en su propia red AISLADA por defecto, y la propia
-# documentación de Coolify advierte que declarar una red custom en el compose
-# causa caídas intermitentes por HTTPS.
+# Red: se une explícitamente a `coolify`, la red que el propio proxy de
+# Coolify usa para llegar a los contenedores que administra (confirmado con
+# `docker network ls` en el server: existe con ese nombre exacto, sin prefijo).
+# No es una red "custom" nueva — es LA MISMA a la que Coolify ya conecta este
+# contenedor por detrás para que el dominio funcione; declararla acá solo la
+# hace explícita y estable ante un redeploy, en vez de depender de un ajuste de
+# la UI.
 #
-# Para que ESTE servicio hable con el Chatwoot de otro recurso en el mismo
-# Coolify: activar "Connect to Predefined Network" en AMBOS recursos (este y
-# el de Chatwoot), desde la pestaña del stack en la UI. Una vez conectados, se
-# referencian por su nombre de servicio/contenedor y el puerto interno — NUNCA
-# por el dominio público (el dominio es para el navegador, no para tráfico
-# entre contenedores del mismo servidor: puede fallar por hairpin NAT).
+# Se abandonó el enfoque de "Connect to Predefined Network" (Configuration >
+# Advanced) documentado para versiones más nuevas: en la 4.3.23, para un
+# recurso tipo Application esa opción no existe en la UI — la sección
+# "Networking" del sidebar solo tiene Ports exposes / Port mappings / Network
+# aliases, nada de toggle de red compartida.
+#
+# Para que Chatwoot (otro recurso en el mismo Coolify) sea alcanzable acá,
+# declarar la MISMA red `coolify: external: true` en su propio compose, y
+# referenciarlo por su nombre de servicio/contenedor — NUNCA por el dominio
+# público (el dominio es para el navegador; tráfico entre contenedores del
+# mismo servidor por su dominio puede fallar por hairpin NAT).
 services:
   wacalls:
     build: .
@@ -58,6 +66,12 @@ services:
       - '${WACALLS_UDP_PORT:-50000}:${WACALLS_UDP_PORT:-50000}/udp'
     volumes:
       - wacalls_data:/data
+    networks:
+      - coolify
 
 volumes:
   wacalls_data:
+
+networks:
+  coolify:
+    external: true
