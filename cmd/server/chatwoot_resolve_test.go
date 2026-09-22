@@ -73,6 +73,10 @@ func TestResolveHandler(t *testing.T) {
 	srv := newTestServer(t)
 	_ = srv.sessions.store.setChatwoot(context.Background(), "sess-A",
 		ChatwootConfig{URL: cw.URL, AccountID: 2, AccountToken: "t", InboxID: 1})
+	// La sesión tiene que estar VIVA: resolve descarta las configs huérfanas,
+	// porque devolver su id le daría al widget una sesión inexistente y el
+	// POST a /calls fallaría con "no such session".
+	srv.sessions.register(&Session{id: "sess-A", name: "test"})
 
 	do := func(q string) (int, map[string]any) {
 		rec := httptest.NewRecorder()
@@ -108,6 +112,10 @@ func TestResolveInboxMismatch(t *testing.T) {
 	srv := newTestServer(t)
 	_ = srv.sessions.store.setChatwoot(context.Background(), "sess-A",
 		ChatwootConfig{URL: cw.URL, AccountID: 2, AccountToken: "t", InboxID: 1})
+	// La sesión tiene que estar VIVA: resolve descarta las configs huérfanas,
+	// porque devolver su id le daría al widget una sesión inexistente y el
+	// POST a /calls fallaría con "no such session".
+	srv.sessions.register(&Session{id: "sess-A", name: "test"})
 
 	rec := httptest.NewRecorder()
 	srv.handleChatwootResolve(rec, httptest.NewRequest(http.MethodGet, "/api/chatwoot/resolve?account_id=2&conversation_id=14", nil))
@@ -176,5 +184,40 @@ func TestStaticIndexInjectsAuthBootstrap(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/app.js", nil))
 	if rec.Body.String() != "ORIGINAL" {
 		t.Fatalf("asset modificado: %q", rec.Body.String())
+	}
+}
+
+// Una config cuya sesión ya no existe no debe entregarse al widget: si se
+// entrega, el POST a /calls responde "no such session" y el agente no tiene
+// forma de saber por qué. Pasa al re-parear un número.
+func TestResolveIgnoraConfigHuerfana(t *testing.T) {
+	cw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"inbox_id": 1,
+			"meta":     map[string]any{"sender": map[string]any{"phone_number": "+593998175516", "name": "Mary"}},
+		})
+	}))
+	defer cw.Close()
+
+	srv := newTestServer(t)
+	cfg := ChatwootConfig{URL: cw.URL, AccountID: 2, AccountToken: "t", InboxID: 1}
+	// "muerta" quedó en la base pero no está registrada; "viva" sí.
+	_ = srv.sessions.store.setChatwoot(context.Background(), "muerta", cfg)
+
+	rec := httptest.NewRecorder()
+	srv.handleChatwootResolve(rec, httptest.NewRequest(http.MethodGet, "/api/chatwoot/resolve?account_id=2&conversation_id=14", nil))
+	if rec.Code != 404 {
+		t.Fatalf("con la sesión muerta debería dar 404, got %d body=%s", rec.Code, rec.Body)
+	}
+
+	_ = srv.sessions.store.setChatwoot(context.Background(), "viva", cfg)
+	srv.sessions.register(&Session{id: "viva", name: "test"})
+
+	rec = httptest.NewRecorder()
+	srv.handleChatwootResolve(rec, httptest.NewRequest(http.MethodGet, "/api/chatwoot/resolve?account_id=2&conversation_id=14", nil))
+	var body map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &body)
+	if rec.Code != 200 || body["session_id"] != "viva" {
+		t.Fatalf("debería elegir la sesión viva: code=%d body=%v", rec.Code, body)
 	}
 }

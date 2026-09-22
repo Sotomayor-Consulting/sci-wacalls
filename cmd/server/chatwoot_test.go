@@ -397,3 +397,44 @@ func TestEnsureContactGroupSinTelefono(t *testing.T) {
 		t.Fatalf("name/avatar mal: %v / %v", created["name"], created["avatar_url"])
 	}
 }
+
+// Borrar una sesión tiene que llevarse su config de Chatwoot: si queda
+// huérfana, handleChatwootResolve se la entrega al widget y el POST a /calls
+// falla con "no such session" — el síntoma tras re-parear el número.
+func TestDeleteSessionArrastraLaConfig(t *testing.T) {
+	store, ctx := newTestStore(t)
+	cfg := ChatwootConfig{URL: "http://rails:3000", AccountID: 5, AccountToken: "t", InboxID: 6}
+	if err := store.setChatwoot(ctx, "vieja", cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.saveConversation(ctx, "vieja", "593@s.whatsapp.net", 1, "src", 9); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.setRecording(ctx, "vieja", true); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.delete(ctx, "vieja"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+
+	if _, ok := store.getChatwoot(ctx, "vieja"); ok {
+		t.Error("la config de Chatwoot quedó huérfana")
+	}
+	if got, _ := store.lookupConversation(ctx, "vieja", "593@s.whatsapp.net"); got != 0 {
+		t.Errorf("el mapeo de conversación quedó huérfano: %d", got)
+	}
+	if store.getRecording(ctx, "vieja") {
+		t.Error("el flag de grabación quedó huérfano")
+	}
+	// Y no se lleva puesto lo de otra sesión.
+	if err := store.setChatwoot(ctx, "otra", cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.delete(ctx, "vieja"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.getChatwoot(ctx, "otra"); !ok {
+		t.Error("borró la config de otra sesión")
+	}
+}

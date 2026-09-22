@@ -114,6 +114,13 @@ func (s *server) handleChatwootResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, sc := range configs {
+		// La config puede haber quedado huérfana: la sesión ya no existe pero
+		// su fila sobrevivió (bases anteriores al borrado en cascada). Sin
+		// este guard le devolvemos al widget un id muerto y el POST a /calls
+		// falla con "no such session", sin pista de por qué.
+		if _, viva := s.sessions.Get(sc.SessionID); !viva {
+			continue
+		}
 		inboxID, phone, name, err := sc.Cfg.getConversation(r.Context(), convID)
 		if err != nil {
 			continue // esta config no puede leer la conversación; probamos la siguiente

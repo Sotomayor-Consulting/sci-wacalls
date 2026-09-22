@@ -24,6 +24,12 @@ func newSessionStore(ctx context.Context, db *sql.DB) (*sessionStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Las tablas de Chatwoot son parte del esquema de este store: delete()
+	// borra en cascada sobre ellas, así que un store sin ellas está roto por
+	// construcción. Es idempotente (CREATE IF NOT EXISTS).
+	if err := ensureChatwootTables(ctx, db); err != nil {
+		return nil, err
+	}
 	return &sessionStore{db: db}, nil
 }
 
@@ -60,7 +66,18 @@ func (s *sessionStore) setJID(ctx context.Context, id, jid string) error {
 	return err
 }
 
+// delete borra la sesión Y todo lo que cuelga de ella. El id es irrepetible
+// (hex aleatorio), así que esas filas no le sirven a nadie más: dejarlas
+// convertía la config de Chatwoot en huérfana, y handleChatwootResolve se la
+// entregaba al widget como si la sesión siguiera viva — el síntoma era un
+// "no such session" al llamar, después de re-parear el número.
 func (s *sessionStore) delete(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, id)
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, id); err != nil {
+		return err
+	}
+	if err := s.deleteChatwoot(ctx, id); err != nil { // arrastra las conversaciones
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM session_recording WHERE session_id = ?`, id)
 	return err
 }
