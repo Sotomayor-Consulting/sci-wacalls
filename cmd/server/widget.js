@@ -226,6 +226,10 @@
   // true cuando la llamada venía de antes de recargar la página: la señalización
   // sigue viva en el motor, pero el audio del navegador se perdió.
   var recovered = false;
+  // true entre que se pide la llamada y que el POST devuelve su id. En esa
+  // ventana ya llega el call-list con la llamada adentro, y sin este flag el
+  // camino de recuperación la confunde con una huérfana de otra pestaña.
+  var starting = false;
 
   function startDurationTimer(startedAt) {
     stopDurationTimer();
@@ -360,6 +364,7 @@
     if (!cx) return;
     showPanel("Llamada");
     setStatus("Resolviendo contacto…");
+    starting = true; // ver la nota en la declaración: evita auto-recuperarnos
     // Ya resuelto al abrir la conversación: evita una segunda vuelta.
     var pre = resolved && resolved.phone ? Promise.resolve(resolved)
       : apiGet("/api/chatwoot/resolve?account_id=" + cx.accountId + "&conversation_id=" + cx.conversationId);
@@ -372,9 +377,11 @@
           // arranca el timer: el audio del cliente recién fluye cuando CONTESTA.
           // El estado REAL (suena / contestó / colgó) llega por SSE.
           wireCallMedia(r.session_id, c.call.callId);
+          starting = false; // ya tenemos el id: el filtro normal alcanza
         });
       })
       .catch(function (err) {
+        starting = false;
         setStatus("No se pudo llamar: " + err.message);
         setTimeout(hidePanel, 4000);
       });
@@ -444,6 +451,7 @@
     currentCallId = null;
     currentSessionId = null;
     recovered = false;
+    starting = false; // si se cortó a mitad del arranque, no dejarlo trabado
     muted = false;
     stopDurationTimer();
     stopRing();
@@ -507,7 +515,12 @@
       // recargó en medio de la llamada. Mostramos el panel para que el agente
       // pueda al menos colgarla, y avisamos que el audio se perdió — dejarla
       // "en curso" sin más sería mentirle.
-      if (!currentCallId && !incoming) {
+      // `starting` excluye la llamada que ESTE navegador acaba de pedir: el
+      // call-list con ella ya adentro llega antes de que responda el POST, así
+      // que sin este guard la tomábamos por huérfana y la "recuperábamos"
+      // —contador arrancando en pleno timbrado, panel diciendo que se recargó
+      // la página, y recovered=true dejando applyStatus() muerto para siempre.
+      if (!currentCallId && !incoming && !starting) {
         for (var j = 0; j < m.calls.length; j++) {
           var c = m.calls[j];
           if (c.status === "connected" || c.status === "ringing") {
@@ -518,7 +531,10 @@
               "Sin audio: se recargó la página",
               '<button id="wc-hangup" style="' + BTN_CSS + 'background:#ef4444">Colgar</button>');
             panel.querySelector("#wc-hangup").onclick = endCall;
-            if (c.startedAt) startDurationTimer(c.startedAt);
+            // Solo se cuenta lo CONECTADO. Una recuperada que todavía timbra
+            // no tiene duración que mostrar — mismo criterio que AstraCalls,
+            // que centraliza el guard en formatCallDuration().
+            if (c.status === "connected" && c.startedAt) startDurationTimer(c.startedAt);
             return;
           }
         }
