@@ -33,7 +33,7 @@ var (
 )
 
 // chatwootToWhatsApp traduce negritas e itálicas de Markdown al formato de
-// WhatsApp. Lo demás pasa sin cambios.
+// WhatsApp, y recorta los espacios de los extremos. Lo demás pasa sin cambios.
 func chatwootToWhatsApp(text string) string {
 	if text == "" {
 		return text
@@ -44,5 +44,11 @@ func chatwootToWhatsApp(text string) string {
 	// OJO con "$1_": en Go el _ es carácter de palabra, así que se interpretaría
 	// como el grupo llamado "1_" y expandiría a vacío.
 	out = reItalicStar.ReplaceAllString(out, "_${1}_")
-	return strings.ReplaceAll(out, boldSentinel, "*")
+	out = strings.ReplaceAll(out, boldSentinel, "*")
+	// El editor de Chatwoot deja saltos de línea al final cuando se envía con
+	// Ctrl+Enter (visto: "Prueba de envio\n\n\n"): en ese modo Enter inserta
+	// salto en vez de enviar, y esos quedan en el contenido. WhatsApp los
+	// respeta y el globo aparece inflado con espacio vacío debajo del texto.
+	// Los saltos INTERNOS no se tocan: solo se recortan los extremos.
+	return strings.TrimSpace(out)
 }

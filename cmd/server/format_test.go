@@ -24,6 +24,14 @@ func TestChatwootToWhatsApp(t *testing.T) {
 			"2 * 3 = 6", "2 * 3 = 6"},
 		{"no se cruza de línea",
 			"*a\nb*", "*a\nb*"},
+		{"saltos al final: se recortan (Ctrl+Enter deja varios)",
+			"Prueba de envio\n\n\n", "Prueba de envio"},
+		{"espacios y saltos al principio también",
+			"\n  Hola", "Hola"},
+		{"los saltos INTERNOS se respetan",
+			"Primera\n\nSegunda\n\n\n", "Primera\n\nSegunda"},
+		{"solo espacios queda vacío",
+			"   \n\n  ", ""},
 		{"vacío", "", ""},
 	}
 	for _, c := range casos {
