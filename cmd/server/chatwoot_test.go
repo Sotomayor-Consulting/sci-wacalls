@@ -177,11 +177,17 @@ func TestCreateConversationAndPostMessage(t *testing.T) {
 	if gotConvBody["source_id"] != "src-1" {
 		t.Fatalf("source_id enviado = %v", gotConvBody["source_id"])
 	}
-	if err := cfg.postMessage(ctx, 99, "hola", "incoming"); err != nil {
+	if err := cfg.postMessage(ctx, 99, "hola", "incoming", "WA-MSG-1"); err != nil {
 		t.Fatalf("postMessage: %v", err)
 	}
 	if gotMsgBody["content"] != "hola" || gotMsgBody["message_type"] != "incoming" {
 		t.Fatalf("mensaje enviado = %v", gotMsgBody)
+	}
+	// El ID del mensaje de WhatsApp viaja como source_id: rastrea el mensaje
+	// de punta a punta y es lo que shouldRelay mira para no reenviar a
+	// WhatsApp algo que vino de WhatsApp.
+	if gotMsgBody["source_id"] != "WA-MSG-1" {
+		t.Fatalf("source_id = %v; quería WA-MSG-1", gotMsgBody["source_id"])
 	}
 }
 
@@ -436,5 +442,25 @@ func TestDeleteSessionArrastraLaConfig(t *testing.T) {
 	}
 	if _, ok := store.getChatwoot(ctx, "otra"); !ok {
 		t.Error("borró la config de otra sesión")
+	}
+}
+
+// WhatsApp reentrega un mensaje cuando no registra nuestro ack a tiempo: en
+// producción se vio el mismo texto llegando dos veces con 3 s de diferencia y
+// duplicándose en la conversación del agente.
+func TestAlreadySeenCortaLaReentrega(t *testing.T) {
+	s := &Session{}
+	if s.alreadySeen("ABC123") {
+		t.Fatal("la primera vez no puede estar visto")
+	}
+	if !s.alreadySeen("ABC123") {
+		t.Fatal("la reentrega del mismo ID debe cortarse")
+	}
+	if s.alreadySeen("OTRO") {
+		t.Fatal("un ID distinto no debe verse afectado")
+	}
+	// Sin ID no hay con qué deduplicar: se procesa, no se descarta.
+	if s.alreadySeen("") || s.alreadySeen("") {
+		t.Fatal("un ID vacío nunca debe contarse como visto")
 	}
 }

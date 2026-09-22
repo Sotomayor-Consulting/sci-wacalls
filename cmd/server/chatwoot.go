@@ -123,6 +123,13 @@ func (s *Session) handleIncomingMessage(evt *events.Message) {
 		return
 	}
 
+	// Ver el comentario de seenIDs: WhatsApp reentrega el mismo mensaje si no
+	// registra nuestro ack, y sin este corte se duplica en la conversación.
+	if s.alreadySeen(evt.Info.ID) {
+		s.log.Debug("chatwoot: mensaje reentregado, ya posteado", "msg_id", evt.Info.ID)
+		return
+	}
+
 	t, ok := s.chatTarget(evt, isGroup, own)
 	if !ok {
 		return
@@ -164,7 +171,7 @@ func (s *Session) handleIncomingMessage(evt *events.Message) {
 	if own {
 		err = cfg.postTextNote(s.mgr.appCtx, convID, t.prefix+text)
 	} else {
-		err = cfg.postMessage(s.mgr.appCtx, convID, t.prefix+text, "incoming")
+		err = cfg.postMessage(s.mgr.appCtx, convID, t.prefix+text, "incoming", evt.Info.ID)
 	}
 	if err != nil {
 		s.log.Error("chatwoot: post message failed", "err", err, "own", own)
@@ -526,8 +533,15 @@ func (c ChatwootConfig) getConversation(ctx context.Context, convID int) (inboxI
 }
 
 // postMessage crea un mensaje en la conversación. dir es "incoming" o "outgoing".
-func (c ChatwootConfig) postMessage(ctx context.Context, convID int, content, dir string) error {
+// postMessage publica un mensaje. sourceID es el ID del mensaje de WhatsApp:
+// queda guardado en Chatwoot como origen del mensaje, sirve para rastrear un
+// mensaje de punta a punta y es además lo que shouldRelay mira para no
+// reenviar a WhatsApp algo que vino de WhatsApp. Puede ir vacío.
+func (c ChatwootConfig) postMessage(ctx context.Context, convID int, content, dir, sourceID string) error {
 	payload := map[string]any{"content": content, "message_type": dir}
+	if sourceID != "" {
+		payload["source_id"] = sourceID
+	}
 	path := fmt.Sprintf("/conversations/%d/messages", convID)
 	data, code, err := c.req(ctx, http.MethodPost, path, payload)
 	if err != nil {

@@ -111,19 +111,26 @@ func (m *CallManager) StartCall(ctx context.Context, callID string, peerJid type
 	if err != nil {
 		return err
 	}
-	ackNode, err := m.sock.Query(ctx, offer)
-	if err != nil {
-		return err
-	}
-
+	// El aparato del destino suena cuando RECIBE el offer, no cuando vuelve el
+	// ack. Esperar el Query acá tenía dos costos: la transición a "ringing" se
+	// retrasaba hasta el ack -y con ella el estado que ve el agente-, y un
+	// Query lento bloqueaba el arranque hasta su timeout, o mataba la llamada
+	// por un error de ack que no impide que el teléfono suene.
 	m.mu.Lock()
 	_ = m.currentCall.ApplyTransition(Transition{Type: TransitionOfferSent})
 	m.emitState()
 	m.mu.Unlock()
 
-	if ackNode != nil {
-		go m.HandleCallAck(context.Background(), ackNode)
-	}
+	go func() {
+		ackNode, qerr := m.sock.Query(context.Background(), offer)
+		if qerr != nil {
+			m.log.Error("offer query error", "call_id", callID, "err", qerr)
+			return
+		}
+		if ackNode != nil {
+			m.HandleCallAck(context.Background(), ackNode)
+		}
+	}()
 
 	m.log.Info("call offer sent", "call_id", callID, "peer", resolved.String())
 	return nil

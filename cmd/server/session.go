@@ -36,6 +36,34 @@ type Session struct {
 	// para no re-espejarlos cuando WhatsApp los devuelve como evento fromMe. Un
 	// fromMe cuyo ID no está aquí vino del aparato (WhatsApp Web) y sí se espeja.
 	sentIDs sync.Map // msgID(string) -> unix ms(int64)
+
+	// seenIDs guarda los IDs ya posteados a Chatwoot. WhatsApp REENTREGA un
+	// mensaje cuando no registra nuestro ack a tiempo: visto en producción el
+	// mismo texto llegando dos veces con 3 s de diferencia y apareciendo
+	// duplicado en la conversación del agente. El ID de mensaje es el único
+	// dato estable para descartarlo — ni el texto ni la hora sirven, porque una
+	// persona puede mandar dos veces lo mismo a propósito.
+	seenIDs sync.Map // msgID(string) -> unix ms(int64)
+}
+
+// alreadySeen marca el mensaje como procesado y dice si YA lo estaba. Es
+// atómico (LoadOrStore) porque dos reentregas pueden llegar a la vez y una
+// comprobación en dos pasos las dejaría pasar a ambas.
+func (s *Session) alreadySeen(id string) bool {
+	if id == "" {
+		return false // sin ID no hay forma de deduplicar; se procesa
+	}
+	now := time.Now().UnixMilli()
+	if _, dup := s.seenIDs.LoadOrStore(id, now); dup {
+		return true
+	}
+	s.seenIDs.Range(func(k, v any) bool {
+		if ts, ok := v.(int64); ok && now-ts > 10*60*1000 {
+			s.seenIDs.Delete(k)
+		}
+		return true
+	})
+	return false
 }
 
 // markSelfSent registra un mensaje enviado por nosotros y poda los viejos (>10m).
