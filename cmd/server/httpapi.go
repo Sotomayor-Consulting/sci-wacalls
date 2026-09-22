@@ -299,20 +299,29 @@ func (s *server) doAccept(sess *Session, w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such call"})
 		return
 	}
+	// Los tres caminos de error de abajo devolvían su código al navegador sin
+	// dejar NADA en el log: ante un "no puedo contestar" no había con qué
+	// diagnosticar del lado del servidor.
 	owner := clientID(r)
 	if other := s.broker.ownerActiveCall(owner); other != "" && other != id {
+		sess.log.Info("accept rechazado: el operador ya está en otra llamada",
+			"call_id", id, "owner", owner, "otra", other)
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "operator already on a call"})
 		return
 	}
 	if !s.broker.setOwner(id, owner) {
+		sess.log.Info("accept rechazado: otro cliente la reclamó primero",
+			"call_id", id, "owner", owner)
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "claimed by another client"})
 		return
 	}
 	s.broker.emitIncomingClaimed(sess.id, id, owner)
 	if err := ac.cm.AcceptCall(r.Context(), id); err != nil {
+		sess.log.Error("accept falló en el motor", "call_id", id, "owner", owner, "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	sess.log.Info("entrante contestada", "call_id", id, "owner", owner)
 	writeJSON(w, http.StatusOK, map[string]any{"call": map[string]string{"callId": id}})
 }
 
