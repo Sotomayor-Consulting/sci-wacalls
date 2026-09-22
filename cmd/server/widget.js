@@ -462,9 +462,17 @@
   function applyStatus(status) {
     if (recovered) return; // el panel ya dice que el audio se perdió
     if (status === "connected") {
-      if (!durTimer) startDurationTimer(); // el cliente CONTESTÓ
+      stopRing(); // el cliente CONTESTÓ: se acaba el tono de espera
+      if (!durTimer) startDurationTimer();
     } else if (status === "ringing") {
-      if (!durTimer) setStatus("Sonando…");
+      if (!durTimer) {
+        setStatus("Sonando…");
+        // Tono de espera para quien llama, como en una llamada de teléfono
+        // normal. Antes solo sonaba en la llamada ENTRANTE (playRing() tenía
+        // un único call site) — acá faltaba conectarlo. endCall() ya limpia
+        // con stopRing() sin condición, cubre colgar/rechazo/sin respuesta.
+        if (!ringCtx) playRing();
+      }
     }
   }
 
