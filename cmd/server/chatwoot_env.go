@@ -81,16 +81,24 @@ func (m *SessionManager) applyChatwootEnv(ctx context.Context) {
 		}
 		matched++
 		prev, had := m.store.getChatwoot(ctx, s.id)
-		if had && prev == cfg {
+		// El secreto no viene de las variables de entorno (se genera solo), así
+		// que se excluye de la comparación: si no, esto nunca coincidiría una
+		// vez que prev tiene un secreto persistido, y se reescribiría en cada
+		// reinicio sin necesidad.
+		prevSinSecreto := prev
+		prevSinSecreto.WebhookSecret = ""
+		if had && prevSinSecreto == cfg {
 			continue // ya está así: no toquetear el mapeo de conversaciones
 		}
 		if err := m.store.setChatwoot(ctx, s.id, cfg); err != nil {
 			log.Error("chatwoot (env): no se pudo guardar", "session", s.id, "err", err)
 			continue
 		}
+		applied, _ := m.store.getChatwoot(ctx, s.id)
 		log.Info("chatwoot (env): configuración aplicada",
 			"session", s.id, "account_id", cfg.AccountID, "inbox_id", cfg.InboxID,
-			"webhook", webhookHint(s.id), slog.String("nota", "el webhook_url del inbox se configura en Chatwoot"))
+			"webhook", webhookHint(s.id, applied.WebhookSecret),
+			slog.String("nota", "el webhook_url del inbox se configura en Chatwoot"))
 	}
 	// Ninguna sesión coincidió: hay que decirlo. Callarse deja la integración
 	// muda con las variables aparentemente bien puestas — el síntoma es que los
@@ -135,8 +143,13 @@ func (m *SessionManager) applyRecordingEnv(ctx context.Context) {
 }
 
 // webhookHint devuelve la ruta que hay que poner como webhook_url del inbox API
-// en Chatwoot. Se loguea al aplicar la config porque es el único paso que no se
-// puede automatizar desde acá.
-func webhookHint(sessionID string) string {
-	return "/api/sessions/" + sessionID + "/chatwoot/webhook"
+// en Chatwoot, con el secreto ya incluido en la query string. Se loguea al
+// aplicar la config porque cargarla ahí es el único paso que no se puede
+// automatizar desde acá.
+func webhookHint(sessionID, secret string) string {
+	url := "/api/sessions/" + sessionID + "/chatwoot/webhook"
+	if secret != "" {
+		url += "?secret=" + secret
+	}
+	return url
 }

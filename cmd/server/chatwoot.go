@@ -40,6 +40,14 @@ type ChatwootConfig struct {
 	AccountToken    string `json:"account_token"`
 	InboxID         int    `json:"inbox_id"`
 	InboxIdentifier string `json:"inbox_identifier"`
+	// WebhookSecret protege la dirección Chatwoot -> WaCalls. Esa ruta queda
+	// exenta de la clave de API porque Chatwoot no permite agregar headers a
+	// sus webhooks; sin esto, lo único que la protege es que el ID de sesión en
+	// la URL sea difícil de adivinar. Se genera solo, nunca lo manda el
+	// cliente. Vacío en configs viejas (de antes de este campo): esas siguen
+	// aceptando el webhook sin exigirlo, para no romper una integración que ya
+	// funciona con solo redesplegar.
+	WebhookSecret string `json:"-"`
 }
 
 func (c ChatwootConfig) valid() bool {

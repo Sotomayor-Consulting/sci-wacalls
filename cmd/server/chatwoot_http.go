@@ -30,7 +30,14 @@ func (s *server) handleSetChatwoot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"chatwoot": redactChatwoot(cfg), "enabled": true})
+	applied, _ := s.sessions.store.getChatwoot(r.Context(), sess.id)
+	// El secreto se devuelve UNA vez acá, para pegar la URL completa en
+	// Chatwoot en el momento — GET no lo vuelve a mostrar (redactChatwoot lo
+	// omite), igual que con account_token.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"chatwoot": redactChatwoot(cfg), "enabled": true,
+		"webhook_url": webhookHint(sess.id, applied.WebhookSecret),
+	})
 }
 
 func (s *server) handleGetChatwoot(w http.ResponseWriter, r *http.Request) {
@@ -58,6 +65,17 @@ func (s *server) handleChatwootWebhook(w http.ResponseWriter, r *http.Request) {
 	sess := s.sessionByID(w, r.PathValue("sid"))
 	if sess == nil {
 		return
+	}
+	// Esta ruta está exenta de X-API-Key porque Chatwoot no permite agregar
+	// headers a sus webhooks: el secreto viaja por query string, que es lo
+	// único que Chatwoot sí controla (vía la URL del webhook_url del inbox).
+	// Una config vieja (de antes de este campo) tiene el secreto vacío y sigue
+	// aceptando sin exigirlo, para no romper una integración que ya funciona.
+	if cfg, ok := s.sessions.store.getChatwoot(r.Context(), sess.id); ok && cfg.WebhookSecret != "" {
+		if r.URL.Query().Get("secret") != cfg.WebhookSecret {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
 	}
 	var p chatwootWebhookPayload
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {

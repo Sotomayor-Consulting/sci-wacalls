@@ -7,7 +7,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
+	"strings"
 )
 
 // ensureChatwootTables crea las tablas de la integración si no existen.
@@ -19,7 +22,8 @@ func ensureChatwootTables(ctx context.Context, db *sql.DB) error {
 			account_id       INTEGER NOT NULL,
 			account_token    TEXT NOT NULL,
 			inbox_id         INTEGER NOT NULL,
-			inbox_identifier TEXT NOT NULL DEFAULT ''
+			inbox_identifier TEXT NOT NULL DEFAULT '',
+			webhook_secret   TEXT NOT NULL DEFAULT ''
 		);
 		CREATE TABLE IF NOT EXISTS chatwoot_conversations (
 			session_id      TEXT NOT NULL,
@@ -33,7 +37,25 @@ func ensureChatwootTables(ctx context.Context, db *sql.DB) error {
 			session_id TEXT PRIMARY KEY,
 			enabled    INTEGER NOT NULL
 		);`)
-	return err
+	if err != nil {
+		return err
+	}
+	// SQLite no tiene "ADD COLUMN IF NOT EXISTS" en todas las versiones que
+	// podemos encontrar en el campo: para una base ya existente (creada antes
+	// de este campo), se intenta el ALTER y se ignora el único error posible
+	// ("duplicate column name"), que significa que ya estaba.
+	if _, err := db.ExecContext(ctx, `ALTER TABLE chatwoot_configs ADD COLUMN webhook_secret TEXT NOT NULL DEFAULT ''`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	return nil
+}
+
+// newWebhookSecret genera un secreto aleatorio para autenticar el webhook.
+func newWebhookSecret() string {
+	b := make([]byte, 24)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // setRecording activa/desactiva la grabación de llamadas de una sesión.
@@ -56,23 +78,35 @@ func (s *sessionStore) getRecording(ctx context.Context, sessionID string) bool 
 }
 
 func (s *sessionStore) setChatwoot(ctx context.Context, sessionID string, c ChatwootConfig) error {
+	prev, had := s.getChatwoot(ctx, sessionID)
 	// Si la config apunta a otra cuenta u otro inbox, los mapeos guardados
 	// referencian conversaciones que no existen ahí: postear en ellas devuelve
 	// 404 indefinidamente. Se invalidan para que se recreen en el próximo
 	// mensaje.
-	if prev, ok := s.getChatwoot(ctx, sessionID); ok &&
-		(prev.AccountID != c.AccountID || prev.InboxID != c.InboxID || prev.URL != c.URL) {
+	if had && (prev.AccountID != c.AccountID || prev.InboxID != c.InboxID || prev.URL != c.URL) {
 		if err := s.clearConversations(ctx, sessionID); err != nil {
 			return err
 		}
 	}
+	// El secreto del webhook se genera una vez y se conserva en los updates
+	// siguientes (rotar el token del agente, por ejemplo, no debe invalidar la
+	// URL que ya está cargada en Chatwoot). Solo se genera de nuevo si la
+	// config anterior no tenía uno (compatibilidad con configs de antes de
+	// este campo).
+	secret := c.WebhookSecret
+	if had && prev.WebhookSecret != "" {
+		secret = prev.WebhookSecret
+	} else if secret == "" {
+		secret = newWebhookSecret()
+	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO chatwoot_configs (session_id, url, account_id, account_token, inbox_id, inbox_identifier)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO chatwoot_configs (session_id, url, account_id, account_token, inbox_id, inbox_identifier, webhook_secret)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id) DO UPDATE SET
 			url=excluded.url, account_id=excluded.account_id, account_token=excluded.account_token,
-			inbox_id=excluded.inbox_id, inbox_identifier=excluded.inbox_identifier`,
-		sessionID, c.URL, c.AccountID, c.AccountToken, c.InboxID, c.InboxIdentifier)
+			inbox_id=excluded.inbox_id, inbox_identifier=excluded.inbox_identifier,
+			webhook_secret=excluded.webhook_secret`,
+		sessionID, c.URL, c.AccountID, c.AccountToken, c.InboxID, c.InboxIdentifier, secret)
 	return err
 }
 
@@ -80,9 +114,9 @@ func (s *sessionStore) setChatwoot(ctx context.Context, sessionID string, c Chat
 func (s *sessionStore) getChatwoot(ctx context.Context, sessionID string) (ChatwootConfig, bool) {
 	var c ChatwootConfig
 	err := s.db.QueryRowContext(ctx, `
-		SELECT url, account_id, account_token, inbox_id, inbox_identifier
+		SELECT url, account_id, account_token, inbox_id, inbox_identifier, webhook_secret
 		FROM chatwoot_configs WHERE session_id = ?`, sessionID).
-		Scan(&c.URL, &c.AccountID, &c.AccountToken, &c.InboxID, &c.InboxIdentifier)
+		Scan(&c.URL, &c.AccountID, &c.AccountToken, &c.InboxID, &c.InboxIdentifier, &c.WebhookSecret)
 	if err != nil {
 		return ChatwootConfig{}, false
 	}

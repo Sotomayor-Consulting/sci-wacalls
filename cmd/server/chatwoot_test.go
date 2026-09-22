@@ -42,17 +42,26 @@ func TestChatwootConfigStore(t *testing.T) {
 		t.Fatalf("setChatwoot: %v", err)
 	}
 	got, ok := store.getChatwoot(ctx, "s1")
+	cfg.WebhookSecret = got.WebhookSecret // autogenerado: no lo manda el caller
 	if !ok || got != cfg {
 		t.Fatalf("getChatwoot = %+v, %v; quería %+v", got, ok, cfg)
 	}
+	if got.WebhookSecret == "" {
+		t.Fatal("setChatwoot debió generar un webhook_secret")
+	}
 
-	// upsert: sobreescribe
+	// upsert: sobreescribe, pero el secreto del webhook se conserva -si
+	// rotara en cada update, la URL ya cargada en Chatwoot dejaría de andar.
 	cfg.AccountToken = "tok2"
 	if err := store.setChatwoot(ctx, "s1", cfg); err != nil {
 		t.Fatalf("setChatwoot upsert: %v", err)
 	}
-	if got, _ := store.getChatwoot(ctx, "s1"); got.AccountToken != "tok2" {
-		t.Fatalf("upsert no aplicó: %q", got.AccountToken)
+	got2, _ := store.getChatwoot(ctx, "s1")
+	if got2.AccountToken != "tok2" {
+		t.Fatalf("upsert no aplicó: %q", got2.AccountToken)
+	}
+	if got2.WebhookSecret != got.WebhookSecret {
+		t.Fatalf("el secreto rotó en el upsert: %q -> %q", got.WebhookSecret, got2.WebhookSecret)
 	}
 
 	if err := store.deleteChatwoot(ctx, "s1"); err != nil {
