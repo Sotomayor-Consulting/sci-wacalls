@@ -245,11 +245,20 @@ func (s *server) doStartCall(sess *Session, w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	s.broker.upsertCall(CallRecord{
+	rec := CallRecord{
 		SessionID: sess.id, CallID: callID, Owner: &owner, Direction: "outbound", Peer: peer.String(),
 		StartedAt: time.Now().UnixMilli(), Status: StatusRinging,
+	}
+	s.broker.upsertCall(rec)
+	// El status va en la respuesta a propósito: upsertCall emite el evento SSE
+	// con este mismo estado ANTES de que esta respuesta llegue al navegador, y
+	// el widget lo descarta porque todavía no conoce el callId. Como la llamada
+	// se queda en Ringing sin más cambios de estado hasta que contesten, sin
+	// devolverlo acá el widget nunca se entera de que está timbrando: ni
+	// muestra el estado ni suena el tono de espera.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"call": map[string]any{"callId": callID, "status": rec.Status},
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"call": map[string]string{"callId": callID}})
 }
 
 func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request) {

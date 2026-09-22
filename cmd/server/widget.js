@@ -375,9 +375,14 @@
         return apiPost("/api/sessions/" + r.session_id + "/calls", { phone: r.phone }).then(function (c) {
           // WebRTC solo arma el camino de audio navegador↔servidor (ICE). NO
           // arranca el timer: el audio del cliente recién fluye cuando CONTESTA.
-          // El estado REAL (suena / contestó / colgó) llega por SSE.
+          // El estado REAL (contestó / colgó) sigue llegando por SSE.
           wireCallMedia(r.session_id, c.call.callId);
           starting = false; // ya tenemos el id: el filtro normal alcanza
+          // El estado inicial viene en la respuesta porque su evento SSE se
+          // emitió antes de que supiéramos el callId y se descartó. Sin esto
+          // no hay "Sonando…" ni tono: la llamada no cambia de estado otra
+          // vez hasta que contesten.
+          if (c.call.status) applyStatus(c.call.status);
         });
       })
       .catch(function (err) {
