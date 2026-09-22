@@ -10,9 +10,16 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
+// Blobs de capability (ver=1) que el aparato del destino lee para decidir si
+// hace sonar la llamada. Son valores del protocolo de WhatsApp, no una
+// elección nuestra: con los que traía el upstream (byte 4 = 0xe4) los clientes
+// actuales IGNORABAN la llamada en silencio — el offer se entregaba, el relay
+// conectaba, y el teléfono nunca sonaba. Alineados al WhatsApp Web actual.
+//
+// El 0xff del preaccept era además inconsistente con el 0xf7 del offer.
 var (
-	capabilityOffer     = []byte{0x01, 0x05, 0xf7, 0x09, 0xe4, 0xbb, 0x07}
-	capabilityPreaccept = []byte{0x01, 0x05, 0xff, 0x09, 0xe4, 0xbb, 0x07}
+	capabilityOffer     = []byte{0x01, 0x05, 0xf7, 0x09, 0xe0, 0xbb, 0x13}
+	capabilityPreaccept = []byte{0x01, 0x05, 0xf7, 0x09, 0xe0, 0xbb, 0x07}
 )
 
 func BuildOfferStanza(ctx context.Context, sock core.VoipSocket, callID string, callKey []byte, peerJid types.JID, isVideo bool) (waBinary.Node, error) {
@@ -37,7 +44,11 @@ func BuildOfferStanza(ctx context.Context, sock core.VoipSocket, callID string, 
 	var offerContent []waBinary.Node
 
 	if token, err := sock.GetTCToken(ctx, wanode.MustJID(wanode.CleanJID(peerJid.String()))); err == nil && len(token) > 0 {
-		offerContent = append(offerContent, waBinary.Node{Tag: "privacy", Content: token})
+		// El tag es "tctoken", NO "privacy": whatsmeow lo usa así en todos sus
+		// stanzas, RejectCall incluido (call.go). El nombre "privacy token" es
+		// cómo se le dice al concepto — de ahí venía la confusión. Con el tag
+		// equivocado el servidor descarta el token y el offer se pierde sin ack.
+		offerContent = append(offerContent, waBinary.Node{Tag: "tctoken", Content: token})
 	}
 
 	offerContent = append(offerContent,
