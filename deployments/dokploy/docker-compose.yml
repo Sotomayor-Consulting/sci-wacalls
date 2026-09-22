@@ -21,7 +21,9 @@
 # Chatwoot) pueda alcanzar este servicio por su nombre corto (`wacalls`).
 services:
   wacalls:
-    build: .
+    build:
+      context: ../..
+      dockerfile: Dockerfile
     restart: always
     environment:
       - WACALLS_API_KEY=${WACALLS_API_KEY}

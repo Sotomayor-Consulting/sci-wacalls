@@ -36,7 +36,9 @@
 # mismo servidor por su dominio puede fallar por hairpin NAT).
 services:
   wacalls:
-    build: .
+    build:
+      context: ../..
+      dockerfile: Dockerfile
     restart: always
     environment:
       - WACALLS_API_KEY=${WACALLS_API_KEY}
