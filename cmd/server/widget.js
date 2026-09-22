@@ -420,7 +420,20 @@
     }
   }
 
-  function endCall() {
+  // Motivo con el que el backend cerró la llamada (evento call-ended, campo
+  // "reason") — viajaba hasta acá y se descartaba sin mostrar nada: el panel
+  // se cerraba en silencio y el agente no se enteraba de si no contestó, si
+  // rechazó, o si se cortó por otra razón.
+  var END_REASONS = {
+    timeout: "No contestó", busy: "Ocupado", declined: "Rechazada",
+    cancelled: "Cancelada", do_not_disturb: "No molestar",
+    failed: "Falló la llamada",
+  };
+
+  // endCall recibe reason SOLO cuando el cierre vino del backend (SSE); un
+  // colgado propio (botón "Colgar") no manda nada, porque el agente ya sabe
+  // que colgó y no hace falta mostrarle un cartel.
+  function endCall(reason) {
     if (activeCall) activeCall.hangup();
     // Tras recargar la página no hay activeCall que colgar, pero la llamada
     // sigue viva en el motor: hay que terminarla por API o queda colgada.
@@ -434,7 +447,12 @@
     muted = false;
     stopDurationTimer();
     stopRing();
-    hidePanel();
+    if (reason && END_REASONS[reason]) {
+      setStatus(END_REASONS[reason]);
+      setTimeout(hidePanel, 3000);
+    } else {
+      hidePanel();
+    }
   }
 
   // ---------- eventos por SSE ----------
@@ -553,7 +571,7 @@
 
     if (!currentCallId || m.id !== currentCallId) return;
     if (ended) {
-      endCall();
+      endCall(m.reason);
       return;
     }
     if (m.type === "call-status") applyStatus(m.status);
