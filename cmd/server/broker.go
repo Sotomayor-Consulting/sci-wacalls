@@ -93,19 +93,56 @@ func (b *Broker) broadcast(ev any) {
 	}
 }
 
-func (b *Broker) emitAuthState(sessionID string, a AuthSnapshot) {
-	b.broadcast(map[string]any{
+// emitTo entrega el evento solo al suscriptor con ese clientID. Con clientID
+// vacío se comporta como broadcast (para emisores internos sin actor).
+func (b *Broker) emitTo(clientID string, ev any) {
+	if clientID == "" {
+		b.broadcast(ev)
+		return
+	}
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for s := range b.subs {
+		if s.clientID != clientID {
+			continue
+		}
+		select {
+		case s.ch <- data:
+		default:
+		}
+	}
+}
+
+// emitAuthState anuncia el estado de auth de una sesión. El QR solo se manda
+// al cliente que pidió el pareo (mismo riesgo que emitSessionQR: escanear el
+// QR pairea el dispositivo sin credenciales); los demás estados van a todos.
+func (b *Broker) emitAuthState(clientID, sessionID string, a AuthSnapshot) {
+	ev := map[string]any{
 		"type": "auth-state", "sessionId": sessionID,
-		"paired": a.Paired, "state": a.State, "qr": a.QR,
-	})
+		"paired": a.Paired, "state": a.State,
+	}
+	if a.QR != "" {
+		ev["qr"] = a.QR
+		b.emitTo(clientID, ev)
+		return
+	}
+	b.broadcast(ev)
 }
 
 func (b *Broker) emitSessionList(sessions []SessionInfo) {
 	b.broadcast(map[string]any{"type": "session-list", "sessions": sessions})
 }
 
-func (b *Broker) emitSessionQR(sessionID, qr string) {
-	b.broadcast(map[string]any{"type": "session-qr", "sessionId": sessionID, "qr": qr})
+// emitSessionQR envía el código QR del pareo SOLO al cliente que pidió el
+// pareo. Antes se broadcastaba: cualquier suscriptor SSE veía los QRs de
+// todas las sesiones, y como el escaneo no usa credencial (WhatsApp solo
+// pide leer el QR), un observador podía pairar un dispositivo ajeno.
+func (b *Broker) emitSessionQR(clientID, sessionID, qr string) {
+	b.emitTo(clientID, map[string]any{"type": "session-qr", "sessionId": sessionID, "qr": qr})
 }
 
 func (b *Broker) upsertCall(r CallRecord) {

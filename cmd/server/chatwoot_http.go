@@ -7,7 +7,7 @@ package main
 //   POST   /api/sessions/{sid}/chatwoot/webhook  recibe eventos de Chatwoot (outgoing -> WhatsApp)
 
 import (
-	"encoding/json"
+	"crypto/subtle"
 	"net/http"
 	"strconv"
 )
@@ -18,7 +18,7 @@ func (s *server) handleSetChatwoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var cfg ChatwootConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+	if err := decodeBody(w, r, &cfg); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
@@ -66,19 +66,27 @@ func (s *server) handleChatwootWebhook(w http.ResponseWriter, r *http.Request) {
 	if sess == nil {
 		return
 	}
-	// Esta ruta está exenta de X-API-Key porque Chatwoot no permite agregar
-	// headers a sus webhooks: el secreto viaja por query string, que es lo
-	// único que Chatwoot sí controla (vía la URL del webhook_url del inbox).
-	// Una config vieja (de antes de este campo) tiene el secreto vacío y sigue
-	// aceptando sin exigirlo, para no romper una integración que ya funciona.
-	if cfg, ok := s.sessions.store.getChatwoot(r.Context(), sess.id); ok && cfg.WebhookSecret != "" {
-		if r.URL.Query().Get("secret") != cfg.WebhookSecret {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
+	// Auth del webhook: esta ruta está exenta de X-API-Key porque Chatwoot no
+	// permite agregar headers a sus webhooks — el secreto viaja por query
+	// string, que es lo único que Chatwoot sí controla (vía la URL del
+	// webhook_url del inbox). Sin una config de Chatwoot no hay a quién firmar
+	// el mensaje y se rechaza: aceptar aquí permitiría reenviar WhatsApp a
+	// cualquier destinatario del payload sin credenciales. Antes esto era
+	// fail-open (sesión sin config o secret vacío aceptaba); se endurece a
+	// fail-closed para no dar acceso de envío a quien no tiene secret.
+	cfg, ok := s.sessions.store.getChatwoot(r.Context(), sess.id)
+	if !ok || cfg.WebhookSecret == "" {
+		sess.log.Warn("chatwoot: webhook rechazado: sesión sin config o sin secreto", "session", sess.id)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	if !secretMatches(r.URL.Query().Get("secret"), cfg.WebhookSecret) {
+		sess.log.Warn("chatwoot: webhook rechazado: secreto inválido", "session", sess.id)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
 	}
 	var p chatwootWebhookPayload
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+	if err := decodeBody(w, r, &p); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
@@ -150,7 +158,7 @@ func (s *server) handleSetRecording(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Enabled bool `json:"enabled"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeBody(w, r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "enabled requerido"})
 		return
 	}
@@ -176,4 +184,13 @@ func redactChatwoot(c ChatwootConfig) ChatwootConfig {
 		c.AccountToken = ""
 	}
 	return c
+}
+
+// secretMatches compara el secret del webhook en tiempo constante para no
+// filtrar información por temporización.
+func secretMatches(got, want string) bool {
+	if want == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }

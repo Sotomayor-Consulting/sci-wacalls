@@ -94,10 +94,12 @@ func (m *SessionManager) applyChatwootEnv(ctx context.Context) {
 			log.Error("chatwoot (env): no se pudo guardar", "session", s.id, "err", err)
 			continue
 		}
-		applied, _ := m.store.getChatwoot(ctx, s.id)
+		// El webhook_url se carga en Chatwoot una sola vez (handleSetChatwoot lo
+		// devuelve completo al configurar). En el log NO va el secret: quedaría
+		// expuesto en los logs de arranque para cualquiera con acceso a ellos.
 		log.Info("chatwoot (env): configuración aplicada",
 			"session", s.id, "account_id", cfg.AccountID, "inbox_id", cfg.InboxID,
-			"webhook", webhookHint(s.id, applied.WebhookSecret),
+			"webhook", webhookHintPath(s.id),
 			slog.String("nota", "el webhook_url del inbox se configura en Chatwoot"))
 	}
 	// Ninguna sesión coincidió: hay que decirlo. Callarse deja la integración
@@ -142,12 +144,17 @@ func (m *SessionManager) applyRecordingEnv(ctx context.Context) {
 	}
 }
 
-// webhookHint devuelve la ruta que hay que poner como webhook_url del inbox API
-// en Chatwoot, con el secreto ya incluido en la query string. Se loguea al
-// aplicar la config porque cargarla ahí es el único paso que no se puede
-// automatizar desde acá.
+// webhookHintPath devuelve la ruta del webhook SIN el secret, para logs y para
+// pintar en la UI (el secret nunca debe quedar en el log).
+func webhookHintPath(sessionID string) string {
+	return "/api/sessions/" + sessionID + "/chatwoot/webhook"
+}
+
+// webhookHint devuelve la URL completa del webhook con el secret en la query
+// string. Solo debe entregarse una vez al configurar (respuesta de
+// handleSetChatwoot); jamás en logs.
 func webhookHint(sessionID, secret string) string {
-	url := "/api/sessions/" + sessionID + "/chatwoot/webhook"
+	url := webhookHintPath(sessionID)
 	if secret != "" {
 		url += "?secret=" + secret
 	}

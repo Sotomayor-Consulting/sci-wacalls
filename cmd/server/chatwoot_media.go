@@ -13,16 +13,115 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/textproto"
+	"net/url"
+	"os"
 	"path"
+	"strconv"
 	"strings"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 )
+
+// maxAttachmentBytes tope de descarga de adjuntos (data_url y media de
+// Chatwoot): evita que una URL enorme o un servidor lento llene la memoria.
+const maxAttachmentBytes = 25 << 20 // 25 MB
+
+// downloadHTTP es el cliente para descargar adjuntos de Chatwoot. Tiene su
+// propia política de redirects: re-valida cada salto contra ssrfDisallowed
+// para que un redirect no saque la descarga hacia la red interna.
+var downloadHTTP = &http.Client{
+	Timeout: 30 * time.Second,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+			return fmt.Errorf("redirect a esquema no soportado: %s", req.URL.Scheme)
+		}
+		return validateDownloadHost(req.URL.Hostname())
+	},
+}
+
+// ssrfDisallowed decide si una IP es inalcanzable para downloadURL.
+// Siempre se bloquean los rangos que exponen el propio host o la red interna
+// crítica: link-local (incluye el metadata 169.254.169.254), multicast y la
+// dirección no especificada. Loopback va bloqueado salvo
+// WACALLS_SSRF_ALLOW_LOOPBACK=true (necesario para los tests que descargan de
+// httptest, que escucha en 127.0.0.1). Las redes privadas normales
+// (10/172.16/192.168 — el stack Docker de Chatwoot las usa) se permiten salvo
+// que WACALLS_SSRF_ALLOW_PRIVATE=false (endurecer donde Chatwoot se alcanza
+// por dominio público).
+func ssrfDisallowed(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() && !allowLoopbackDownload() {
+		return true
+	}
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	if allowPrivateDownload() {
+		return false
+	}
+	return ip.IsPrivate()
+}
+
+// allowLoopbackDownload lee WACALLS_SSRF_ALLOW_LOOPBACK (por defecto false).
+func allowLoopbackDownload() bool {
+	return parseBoolEnv("WACALLS_SSRF_ALLOW_LOOPBACK")
+}
+
+// allowPrivateDownload lee WACALLS_SSRF_ALLOW_PRIVATE. Por defecto true: el
+// stack Docker local tiene a Chatwoot en la red privada (172.x) y sin esto la
+// subida de adjuntos dejaría de funcionar. Quien quiera endurecer (Chatwoot en
+// un dominio público) pone WACALLS_SSRF_ALLOW_PRIVATE=false.
+func allowPrivateDownload() bool {
+	raw := strings.TrimSpace(os.Getenv("WACALLS_SSRF_ALLOW_PRIVATE"))
+	if raw == "" {
+		return true
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return true
+	}
+	return v
+}
+
+func parseBoolEnv(key string) bool {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return false
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false
+	}
+	return v
+}
+
+// validateDownloadHost resuelve el host y rechaza si alguna de sus IPs está en
+// ssrfDisallowed. Se llama contra el host original y contra cada redirect.
+func validateDownloadHost(host string) error {
+	if host == "" {
+		return fmt.Errorf("sin host")
+	}
+	addrs, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("resolver %s: %w", host, err)
+	}
+	for _, ip := range addrs {
+		if ssrfDisallowed(ip) {
+			return fmt.Errorf("host %s resuelve a una IP no permitida (%s)", host, ip)
+		}
+	}
+	return nil
+}
 
 // incomingMedia describe el media de un mensaje entrante de WhatsApp.
 type incomingMedia struct {
@@ -242,11 +341,21 @@ func buildOutgoingMedia(fileType, mimetype, filename, caption string, size uint6
 // downloadURL descarga un recurso y devuelve datos, content-type y un nombre de
 // archivo derivado de la ruta de la URL.
 func downloadURL(ctx context.Context, rawURL string) (data []byte, contentType, filename string, err error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("URL inválida: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, "", "", fmt.Errorf("esquema no soportado: %s", u.Scheme)
+	}
+	if err := validateDownloadHost(u.Hostname()); err != nil {
+		return nil, "", "", err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, "", "", err
 	}
-	resp, err := cwHTTP.Do(req)
+	resp, err := downloadHTTP.Do(req)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -254,9 +363,12 @@ func downloadURL(ctx context.Context, rawURL string) (data []byte, contentType, 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, "", "", fmt.Errorf("status %d", resp.StatusCode)
 	}
-	data, err = io.ReadAll(resp.Body)
+	data, err = io.ReadAll(io.LimitReader(resp.Body, maxAttachmentBytes+1))
 	if err != nil {
 		return nil, "", "", err
+	}
+	if len(data) > maxAttachmentBytes {
+		return nil, "", "", fmt.Errorf("adjunto demasiado grande (>%d bytes)", maxAttachmentBytes)
 	}
 	ct := resp.Header.Get("Content-Type")
 	if i := strings.IndexByte(ct, ';'); i >= 0 {

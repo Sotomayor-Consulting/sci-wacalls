@@ -2,11 +2,79 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 )
 
 func ownerPtr(s string) *string { return &s }
+
+// El QR del pareo (y el auth-state con QR) solo debe llegar al suscriptor que
+// pidió el pareo, no a cualquier cliente conectado al broker: escanear el QR
+// pairea el dispositivo sin pedir credenciales.
+func TestEmitSessionQRDirigido(t *testing.T) {
+	b := NewBroker()
+	subA := b.subscribe("cliente-A")
+	subB := b.subscribe("cliente-B")
+	defer b.unsubscribe(subA)
+	defer b.unsubscribe(subB)
+
+	b.emitSessionQR("cliente-A", "s-1", "QR-PRIVADO")
+	b.emitAuthState("cliente-A", "s-1", AuthSnapshot{State: "qr", QR: "QR-PRIVADO"})
+
+	gotA := collectBrokerEvents(t, subA.ch, 2)
+	for _, ev := range gotA {
+		var m map[string]any
+		if err := json.Unmarshal(ev, &m); err != nil {
+			t.Fatalf("evento no-JSON del target: %v", err)
+		}
+		if m["qr"] == nil || m["qr"] != "QR-PRIVADO" {
+			t.Fatalf("el cliente target no recibió el QR: %v", m)
+		}
+	}
+	// El otro cliente no recibe nada: espera un ratito y comprueba que el canal
+	// siga vacío (sin bloquear).
+	select {
+	case ev := <-subB.ch:
+		t.Fatalf("el otro cliente recibió un evento: %s", ev)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// Cambios de estado SIN QR (open/logged_out) siguen yendo a todos, porque son
+// el estado general de la sesión, no un secreto de pareo.
+func TestEmitAuthStateSinQRSeDifunde(t *testing.T) {
+	b := NewBroker()
+	subA := b.subscribe("cliente-A")
+	subB := b.subscribe("cliente-B")
+	defer b.unsubscribe(subA)
+	defer b.unsubscribe(subB)
+
+	b.emitAuthState("cliente-A", "s-1", AuthSnapshot{State: "open", Paired: true})
+
+	// El otro cliente recibe el evento (sin QR) pero no el QR.
+	got := collectBrokerEvents(t, subB.ch, 1)[0]
+	var m map[string]any
+	_ = json.Unmarshal(got, &m)
+	if m["qr"] != nil {
+		t.Fatalf("el evento difundido no debería traer QR: %v", m)
+	}
+}
+
+func collectBrokerEvents(t *testing.T, ch <-chan []byte, n int) [][]byte {
+	t.Helper()
+	out := make([][]byte, 0, n)
+	deadline := time.After(2 * time.Second)
+	for len(out) < n {
+		select {
+		case ev := <-ch:
+			out = append(out, ev)
+		case <-deadline:
+			t.Fatalf("timeout esperando %d eventos, tengo %d", n, len(out))
+		}
+	}
+	return out
+}
 
 func TestOwnerActiveCall(t *testing.T) {
 	b := NewBroker()

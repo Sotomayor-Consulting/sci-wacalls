@@ -11,15 +11,18 @@ import (
 )
 
 // Blobs de capability (ver=1) que el aparato del destino lee para decidir si
-// hace sonar la llamada. Son valores del protocolo de WhatsApp, no una
-// elección nuestra: con los que traía el upstream (byte 4 = 0xe4) los clientes
-// actuales IGNORABAN la llamada en silencio — el offer se entregaba, el relay
-// conectaba, y el teléfono nunca sonaba. Alineados al WhatsApp Web actual.
+// hace sonar la llamada. Son valores de protocolo de WhatsApp, corroborados por
+// dos reconstrucciones independientes que colocan llamadas reales (zapo-caller,
+// whatsapp-rust, via wacrg.org/signaling/stanza-reference):
 //
-// El 0xff del preaccept era además inconsistente con el 0xf7 del offer.
+//   - offer/accept: 01 05 f7 09 e4 bb 13   (termina en 13)
+//   - preaccept:     01 05 f7 09 e4 bb 07  (termina en 07)
+//
+// El byte 4 es 0xe4 en ambas. Un cambio anterior a 0xe0 hizo que el servidor
+// descartara el offer sin ack (síntoma: "call offer sent" y nada más).
 var (
-	capabilityOffer     = []byte{0x01, 0x05, 0xf7, 0x09, 0xe0, 0xbb, 0x13}
-	capabilityPreaccept = []byte{0x01, 0x05, 0xf7, 0x09, 0xe0, 0xbb, 0x07}
+	capabilityOffer     = []byte{0x01, 0x05, 0xf7, 0x09, 0xe4, 0xbb, 0x13}
+	capabilityPreaccept = []byte{0x01, 0x05, 0xf7, 0x09, 0xe4, 0xbb, 0x07}
 )
 
 func BuildOfferStanza(ctx context.Context, sock core.VoipSocket, callID string, callKey []byte, peerJid types.JID, isVideo bool) (waBinary.Node, error) {
@@ -44,11 +47,11 @@ func BuildOfferStanza(ctx context.Context, sock core.VoipSocket, callID string, 
 	var offerContent []waBinary.Node
 
 	if token, err := sock.GetTCToken(ctx, wanode.MustJID(wanode.CleanJID(peerJid.String()))); err == nil && len(token) > 0 {
-		// El tag es "tctoken", NO "privacy": whatsmeow lo usa así en todos sus
-		// stanzas, RejectCall incluido (call.go). El nombre "privacy token" es
-		// cómo se le dice al concepto — de ahí venía la confusión. Con el tag
-		// equivocado el servidor descarta el token y el offer se pierde sin ack.
-		offerContent = append(offerContent, waBinary.Node{Tag: "tctoken", Content: token})
+		// En el <offer> el token de privacidad va en un hijo <privacy>, no
+		// <tctoken> (el corpus wacrg lo confirma en el stanza reference; el
+		// "tctoken" de whatsmeow es solo del <reject>, no del offer). Con el
+		// tag equivocado el servidor descarta el offer sin ack.
+		offerContent = append(offerContent, waBinary.Node{Tag: "privacy", Content: token})
 	}
 
 	offerContent = append(offerContent,

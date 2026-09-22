@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -124,6 +125,9 @@ func TestPostAttachmentMultipart(t *testing.T) {
 }
 
 func TestDownloadURL(t *testing.T) {
+	// httptest escucha en 127.0.0.1; el loopback está bloqueado por defecto
+	// (política SSRF), así que el test lo habilita explícitamente.
+	t.Setenv("WACALLS_SSRF_ALLOW_LOOPBACK", "true")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/pdf; charset=binary")
 		w.Write([]byte("PDFDATA"))
@@ -136,5 +140,60 @@ func TestDownloadURL(t *testing.T) {
 	}
 	if string(data) != "PDFDATA" || ct != "application/pdf" || name != "factura.pdf" {
 		t.Fatalf("data=%q ct=%q name=%q", string(data), ct, name)
+	}
+}
+
+func TestDownloadURLRejectsUnsafe(t *testing.T) {
+	ctx := context.Background()
+
+	// Esquema no-http(s) → rechazado.
+	for _, u := range []string{"file:///etc/passwd", "ftp://host/x", "gopher://host/1"} {
+		if _, _, _, err := downloadURL(ctx, u); err == nil {
+			t.Fatalf("esquema inseguro %q aceptado", u)
+		}
+	}
+
+	// Loopback sin habilitar → rechazado (esto NO setea el env, default false).
+	lb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("x")) }))
+	defer lb.Close()
+	if _, _, _, err := downloadURL(ctx, lb.URL); err == nil {
+		t.Fatal("loopback debería estar bloqueado por defecto")
+	}
+
+	// URL malformada → rechazada.
+	if _, _, _, err := downloadURL(ctx, "://sin esuama"); err == nil {
+		t.Fatal("URL malformada aceptada")
+	}
+}
+
+func TestSSRFDisallowed(t *testing.T) {
+	// Casos con la política por defecto (loopback off, privadas on).
+	for _, loc := range []string{"127.0.0.1", "::1"} {
+		ip := net.ParseIP(loc)
+		if !ssrfDisallowed(ip) {
+			t.Fatalf("%s debería estar bloqueado", loc)
+		}
+	}
+	for _, loc := range []string{"169.254.169.254", "169.254.10.1", "fe80::1", "224.0.0.1", "0.0.0.0"} {
+		ip := net.ParseIP(loc)
+		if !ssrfDisallowed(ip) {
+			t.Fatalf("%s debería estar bloqueado", loc)
+		}
+	}
+	// Privadas Docker (red del stack) permitidas por defecto.
+	for _, loc := range []string{"172.17.0.5", "10.0.0.4", "192.168.1.20"} {
+		ip := net.ParseIP(loc)
+		if ssrfDisallowed(ip) {
+			t.Fatalf("%s debería estar permitido con privadas on", loc)
+		}
+	}
+
+	// Con WACALLS_SSRF_ALLOW_PRIVATE=false, las privadas se bloquean.
+	t.Setenv("WACALLS_SSRF_ALLOW_PRIVATE", "false")
+	for _, loc := range []string{"172.17.0.5", "10.0.0.4", "192.168.1.20"} {
+		ip := net.ParseIP(loc)
+		if !ssrfDisallowed(ip) {
+			t.Fatalf("%s debería estar bloqueado con privadas off", loc)
+		}
 	}
 }

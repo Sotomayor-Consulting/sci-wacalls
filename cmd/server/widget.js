@@ -358,7 +358,21 @@
       function (state, msg) {
         if (state === "error") setStatus("Error: " + (msg || ""));
       },
-      function () { activeCall = null; stopDurationTimer(); }
+      function () {
+        activeCall = null;
+        // Si el WebRTC no llega a arrancar (micrófono denegado, worklet que no
+        // carga, ICE que falla) el `.catch` cae acá; sin limpiar los IDs, el
+        // guard de la 572 (`if (activeCall || currentCallId) return;`) dejaría
+        // el widget sordo: ya no atendía NI una llamada entrante nueva. Al
+        // colgar normal este onClose se dispara antes de que endCall() reasigne
+        // a null, así que limpiar acá es sano en ambos caminos.
+        currentCallId = null;
+        currentSessionId = null;
+        recovered = false;
+        attaching = false;
+        muted = false;
+        stopDurationTimer();
+      }
     );
   }
 
@@ -534,7 +548,13 @@
       if (!currentCallId && !incoming && !attaching) {
         for (var j = 0; j < m.calls.length; j++) {
           var c = m.calls[j];
-          if (c.status === "connected" || c.status === "ringing") {
+          // Una entrante en "ringing" es una llamada NUEVA: su evento `incoming`
+          // llega justo después del call-list en el SSE. Recuperarla acá encendía
+          // el panel fantasma "Sin audio: se recargó la página" y, peor, le robaba
+          // el id a la entrante (currentCallId quedaba seteado y el `incoming`
+          // real se descartaba). Solo se recuperan llamadas que este navegador
+          // perdió por recargar: una saliente en timbrado o una ya establecida.
+          if (c.status === "connected" || (c.status === "ringing" && c.direction !== "inbound")) {
             currentCallId = c.callId;
             currentSessionId = c.sessionId;
             recovered = true;

@@ -32,6 +32,11 @@ type Session struct {
 	mu   sync.Mutex
 	auth AuthSnapshot
 
+	// pairClientID es el cliente que inició el pareo: a él van el QR y el
+	// estado qr (el escaneo pairea sin credenciales, así que el QR no debe
+	// difundirse a cualquiera). Empty si el pareo lo disparó algo interno.
+	pairClientID string
+
 	// sentIDs guarda los IDs de mensajes que enviamos nosotros (por Chatwoot),
 	// para no re-espejarlos cuando WhatsApp los devuelve como evento fromMe. Un
 	// fromMe cuyo ID no está aquí vino del aparato (WhatsApp Web) y sí se espeja.
@@ -274,9 +279,9 @@ func (s *Session) handleEvent(rawEvt any) {
 		if id := s.client.Store.ID; id != nil {
 			_ = s.mgr.store.setJID(s.mgr.appCtx, s.id, id.String())
 		}
-		s.setAuth(AuthSnapshot{State: "open", Paired: true})
+		s.setAuth("", AuthSnapshot{State: "open", Paired: true})
 	case *events.LoggedOut:
-		s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
+		s.setAuth("", AuthSnapshot{State: "logged_out", Paired: false})
 	case *events.Message:
 		s.handleIncomingMessage(evt)
 	case *events.CallOffer:
@@ -304,10 +309,10 @@ func (s *Session) connect(ctx context.Context) error {
 	if s.client.Store.ID != nil {
 		return s.client.Connect()
 	}
-	return s.startPairing(ctx)
+	return s.startPairing(ctx, "")
 }
 
-func (s *Session) startPairing(ctx context.Context) error {
+func (s *Session) startPairing(ctx context.Context, pairClientID string) error {
 	qrChan, err := s.client.GetQRChannel(ctx)
 	if err != nil {
 		return err
@@ -321,26 +326,27 @@ func (s *Session) startPairing(ctx context.Context) error {
 			case "code":
 				s.log.Info("scan the QR code to pair this session")
 				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-				s.setAuth(AuthSnapshot{State: "qr", QR: evt.Code})
-				s.mgr.broker.emitSessionQR(s.id, evt.Code)
+				s.setAuth(pairClientID, AuthSnapshot{State: "qr", QR: evt.Code})
+				s.mgr.broker.emitSessionQR(pairClientID, s.id, evt.Code)
 			case "success":
 				if id := s.client.Store.ID; id != nil {
 					_ = s.mgr.store.setJID(s.mgr.appCtx, s.id, id.String())
 				}
-				s.setAuth(AuthSnapshot{State: "open", Paired: true})
+				s.setAuth(pairClientID, AuthSnapshot{State: "open", Paired: true})
 			case "timeout":
-				s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
+				s.setAuth(pairClientID, AuthSnapshot{State: "logged_out", Paired: false})
 			}
 		}
 	}()
 	return nil
 }
 
-func (s *Session) setAuth(a AuthSnapshot) {
+func (s *Session) setAuth(pairClientID string, a AuthSnapshot) {
 	s.mu.Lock()
 	s.auth = a
+	s.pairClientID = pairClientID
 	s.mu.Unlock()
-	s.mgr.broker.emitAuthState(s.id, a)
+	s.mgr.broker.emitAuthState(pairClientID, s.id, a)
 	s.mgr.broker.emitSessionList(s.mgr.infos())
 }
 

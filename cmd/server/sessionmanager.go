@@ -130,7 +130,7 @@ func (m *SessionManager) Restore(ctx context.Context) error {
 	return nil
 }
 
-func (m *SessionManager) Create(name string) (string, error) {
+func (m *SessionManager) Create(name, pairClientID string) (string, error) {
 	id := newSessionID()
 	if err := m.store.insert(m.appCtx, id, name); err != nil {
 		return "", err
@@ -144,7 +144,7 @@ func (m *SessionManager) Create(name string) (string, error) {
 	m.applyChatwootEnv(m.appCtx)
 	m.applyRecordingEnv(m.appCtx)
 	m.broker.emitSessionList(m.infos())
-	if err := s.startPairing(m.appCtx); err != nil {
+	if err := s.startPairing(m.appCtx, pairClientID); err != nil {
 		m.log.Error("start pairing failed", "session", id, "err", err)
 		return "", fmt.Errorf("start pairing: %w", err)
 	}
@@ -186,12 +186,12 @@ func (m *SessionManager) Logout(ctx context.Context, id string) error {
 	}
 	s.replaceClient(whatsmeow.NewClient(m.container.NewDevice(), m.waLogger))
 	_ = m.store.setJID(ctx, id, "")
-	s.setAuth(AuthSnapshot{State: "logged_out", Paired: false})
+	s.setAuth("", AuthSnapshot{State: "logged_out", Paired: false})
 	m.log.Info("session disconnected", "session", id)
 	return nil
 }
 
-func (m *SessionManager) Pair(id string) error {
+func (m *SessionManager) Pair(id, pairClientID string) error {
 	s, ok := m.Get(id)
 	if !ok {
 		return fmt.Errorf("no session %s", id)
@@ -200,7 +200,7 @@ func (m *SessionManager) Pair(id string) error {
 		return fmt.Errorf("session already paired")
 	}
 	s.replaceClient(whatsmeow.NewClient(m.container.NewDevice(), m.waLogger))
-	if err := s.startPairing(m.appCtx); err != nil {
+	if err := s.startPairing(m.appCtx, pairClientID); err != nil {
 		return fmt.Errorf("start pairing: %w", err)
 	}
 	m.broker.emitSessionList(m.infos())

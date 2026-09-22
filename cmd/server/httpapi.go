@@ -114,6 +114,21 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// maxBodyBytes tope del cuerpo JSON de los endpoints: un body gigante se lee
+// entero en memoria y es una vía de DoS sin ningún beneficio funcional.
+const maxBodyBytes = 1 << 20 // 1 MB
+
+// decodeBody decodifica el body JSON con un tope de tamaño. Devuelve error
+// también cuando el body excede el límite (MaxBytesReader).
+func decodeBody(w http.ResponseWriter, r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	return nil
+}
+
 func clientID(r *http.Request) string {
 	if id := r.Header.Get("X-Client-Id"); id != "" {
 		return id
@@ -142,12 +157,12 @@ func (s *server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name string `json:"name"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	_ = decodeBody(w, r, &body)
 	name := strings.TrimSpace(body.Name)
 	if name == "" {
 		name = "Session"
 	}
-	id, err := s.sessions.Create(name)
+	id, err := s.sessions.Create(name, clientID(r))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -172,7 +187,7 @@ func (s *server) handleSessionLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleSessionPair(w http.ResponseWriter, r *http.Request) {
-	if err := s.sessions.Pair(r.PathValue("sid")); err != nil {
+	if err := s.sessions.Pair(r.PathValue("sid"), clientID(r)); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -225,7 +240,7 @@ func (s *server) doStartCall(sess *Session, w http.ResponseWriter, r *http.Reque
 		DurationMs int    `json:"duration_ms"`
 		Record     bool   `json:"record"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Phone) == "" {
+	if err := decodeBody(w, r, &body); err != nil || strings.TrimSpace(body.Phone) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "phone required"})
 		return
 	}
@@ -271,7 +286,7 @@ func (s *server) doWebRTC(sess *Session, w http.ResponseWriter, r *http.Request)
 	var body struct {
 		SDPOffer string `json:"sdp_offer"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.SDPOffer == "" {
+	if err := decodeBody(w, r, &body); err != nil || body.SDPOffer == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sdp_offer required"})
 		return
 	}
