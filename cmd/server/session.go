@@ -157,6 +157,14 @@ func (s *Session) wireCall(cm *call.CallManager, callID string) {
 	}
 }
 
+// ringTimeout corta una saliente que nadie contesta. WhatsApp manda su propio
+// "timeout" (~45 s) pero NO siempre llega: se vieron llamadas quedando en
+// ringing indefinidamente — el navegador timbrando para siempre y la llamada
+// viva en el registro, sin pasar nunca al historial. Esto es la red de
+// seguridad, deliberadamente más larga que la de WhatsApp para que solo actúe
+// cuando la de ellos falla.
+const ringTimeout = 60 * time.Second
+
 func (s *Session) startOutgoing(ctx context.Context, peer types.JID, isVideo bool) (string, error) {
 	callID := signaling.GenerateCallID()
 	cm := s.createCall(callID)
@@ -164,7 +172,35 @@ func (s *Session) startOutgoing(ctx context.Context, peer types.JID, isVideo boo
 		s.removeCall(callID)
 		return "", err
 	}
+	s.watchRingTimeout(callID)
 	return callID, nil
+}
+
+// watchRingTimeout termina la llamada si sigue timbrando pasado ringTimeout.
+func (s *Session) watchRingTimeout(callID string) {
+	go cutIfStillRinging(s.mgr.appCtx, s.mgr.broker, callID, ringTimeout, func() {
+		s.log.Info("saliente sin contestar: se corta por timeout",
+			"call_id", callID, "tras", ringTimeout)
+		s.terminateCall(callID, core.EndCallReasonTimeout)
+	})
+}
+
+// cutIfStillRinging espera `after` y recién entonces decide, mirando el estado
+// que ya publica el broker: si contestaron pasó a connected y no se toca nada;
+// si terminó por cualquier vía, el registro ya no está. Vive aparte del método
+// para poder testear la decisión sin armar una Session entera ni esperar el
+// minuto real.
+func cutIfStillRinging(ctx context.Context, b *Broker, callID string, after time.Duration, cut func()) {
+	t := time.NewTimer(after)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-t.C:
+	}
+	if rec, ok := b.getCall(callID); ok && rec.Status == StatusRinging {
+		cut()
+	}
 }
 
 func (s *Session) callForEvent(from types.JID, data *waBinary.Node) (*activeCall, bool) {
