@@ -1,0 +1,63 @@
+# Despliegue del motor en Dokploy.
+#
+# Dokploy busca "./docker-compose.yml" por defecto en la raíz del repo: si se
+# usa esta ruta, hay que poner "deployments/dokploy/docker-compose.yml" en el
+# campo "Compose Path" del recurso.
+#
+# Dos detalles no opcionales:
+#
+# 1. El puerto HTTP va con `expose`, NO publicado en el host: el proxy de
+#    Dokploy corre en un contenedor y alcanza al servicio por la red
+#    `dokploy-network`. Publicarlo en 127.0.0.1 lo dejaría inalcanzable para
+#    Traefik — el síntoma es 404 en el dominio asignado, en TODAS las rutas
+#    (incluidas las que sí existen), porque el proxy nunca llega a preguntarle
+#    nada al proceso.
+# 2. El puerto de MEDIOS sí se publica de verdad. El audio es UDP directo
+#    navegador<->motor y Traefik no enruta UDP: sin este mapeo (y sin abrirlo
+#    en el firewall del proveedor) la llamada conecta y no se escucha nada.
+#
+# A diferencia de Coolify: acá SÍ hace falta declarar la red compartida
+# `dokploy-network` (externa) para que otro recurso del mismo Dokploy (p. ej.
+# Chatwoot) pueda alcanzar este servicio por su nombre corto (`wacalls`).
+services:
+  wacalls:
+    build: .
+    restart: always
+    environment:
+      - WACALLS_API_KEY=${WACALLS_API_KEY}
+      # Clave ACOTADA para widget.js: queda visible en el DOM de los agentes.
+      # Nunca poner acá la maestra.
+      - WACALLS_WIDGET_KEY=${WACALLS_WIDGET_KEY}
+      - WACALLS_MAX_CALLS=${WACALLS_MAX_CALLS:-8}
+      # IP PÚBLICA del host, no la de Docker: es la que el motor le anuncia al
+      # navegador como destino del audio.
+      - WACALLS_PUBLIC_IP=${WACALLS_PUBLIC_IP}
+      - WACALLS_UDP_PORT=${WACALLS_UDP_PORT:-50000}
+      # Si Chatwoot está en el MISMO Dokploy: nombre corto del servicio, por
+      # ejemplo http://rails:3000 (nunca https:// — el motor no termina TLS
+      # internamente). Si está en otra máquina: su URL pública.
+      - WACALLS_CHATWOOT_URL=${WACALLS_CHATWOOT_URL}
+      - WACALLS_CHATWOOT_ACCOUNT_ID=${WACALLS_CHATWOOT_ACCOUNT_ID}
+      - WACALLS_CHATWOOT_TOKEN=${WACALLS_CHATWOOT_TOKEN}
+      - WACALLS_CHATWOOT_INBOX_ID=${WACALLS_CHATWOOT_INBOX_ID}
+      - WACALLS_CHATWOOT_INBOX_IDENTIFIER=${WACALLS_CHATWOOT_INBOX_IDENTIFIER}
+      - WACALLS_CHATWOOT_SESSION=${WACALLS_CHATWOOT_SESSION:-inbox-b}
+      # Grabación de llamadas. Vacío = manda el toggle por API. Con un número
+      # real, revisar el requisito legal de consentimiento antes de activarla.
+      - WACALLS_RECORDING=${WACALLS_RECORDING:-}
+    expose:
+      - '8080'
+    ports:
+      - '${WACALLS_UDP_PORT:-50000}:${WACALLS_UDP_PORT:-50000}/udp'
+    volumes:
+      # Sesión de WhatsApp, config de Chatwoot y grabaciones, en un solo SQLite.
+      - wacalls_data:/data
+    networks:
+      - dokploy-network
+
+volumes:
+  wacalls_data:
+
+networks:
+  dokploy-network:
+    external: true

@@ -1,0 +1,63 @@
+# Despliegue del motor en Coolify (probado contra v4.3.23).
+#
+# Create Resource -> Docker Compose, origen Git, "Compose Path":
+#   deployments/coolify/docker-compose.yml
+#
+# Dos detalles no opcionales, iguales a cualquier PaaS con proxy propio:
+#
+# 1. El puerto HTTP va con `expose`, NO publicado en el host: el proxy de
+#    Coolify alcanza al servicio por su red interna. Sin esta línea el síntoma
+#    es 404 en TODAS las rutas del dominio asignado, incluidas las que sí
+#    existen (/widget.js, /api/sessions) — el proxy nunca llega a preguntarle
+#    nada al proceso, así que ni siquiera es un error de nuestro código.
+# 2. El puerto de MEDIOS sí se publica de verdad. El audio es UDP directo
+#    navegador<->motor y el proxy de Coolify no enruta UDP: sin este mapeo (y
+#    sin abrirlo en el firewall del proveedor) la llamada conecta y no se
+#    escucha nada, sin error en los logs.
+#
+# NO se declara una sección `networks:` propia acá. A diferencia de Dokploy,
+# en Coolify cada stack vive en su propia red AISLADA por defecto, y la propia
+# documentación de Coolify advierte que declarar una red custom en el compose
+# causa caídas intermitentes por HTTPS.
+#
+# Para que ESTE servicio hable con el Chatwoot de otro recurso en el mismo
+# Coolify: activar "Connect to Predefined Network" en AMBOS recursos (este y
+# el de Chatwoot), desde la pestaña del stack en la UI. Una vez conectados, se
+# referencian por su nombre de servicio/contenedor y el puerto interno — NUNCA
+# por el dominio público (el dominio es para el navegador, no para tráfico
+# entre contenedores del mismo servidor: puede fallar por hairpin NAT).
+services:
+  wacalls:
+    build: .
+    restart: always
+    environment:
+      - WACALLS_API_KEY=${WACALLS_API_KEY}
+      # Clave ACOTADA para widget.js: queda visible en el DOM de los agentes.
+      # Nunca poner acá la maestra.
+      - WACALLS_WIDGET_KEY=${WACALLS_WIDGET_KEY}
+      - WACALLS_MAX_CALLS=${WACALLS_MAX_CALLS:-8}
+      # IP PÚBLICA del host, no la de Docker: es la que el motor le anuncia al
+      # navegador como destino del audio.
+      - WACALLS_PUBLIC_IP=${WACALLS_PUBLIC_IP}
+      - WACALLS_UDP_PORT=${WACALLS_UDP_PORT:-50000}
+      # Nombre de servicio/contenedor de Chatwoot en Coolify (ver comentario
+      # de arriba), NUNCA su dominio público. Esquema http://, sin TLS: el
+      # motor no lo termina.
+      - WACALLS_CHATWOOT_URL=${WACALLS_CHATWOOT_URL}
+      - WACALLS_CHATWOOT_ACCOUNT_ID=${WACALLS_CHATWOOT_ACCOUNT_ID}
+      - WACALLS_CHATWOOT_TOKEN=${WACALLS_CHATWOOT_TOKEN}
+      - WACALLS_CHATWOOT_INBOX_ID=${WACALLS_CHATWOOT_INBOX_ID}
+      - WACALLS_CHATWOOT_INBOX_IDENTIFIER=${WACALLS_CHATWOOT_INBOX_IDENTIFIER}
+      - WACALLS_CHATWOOT_SESSION=${WACALLS_CHATWOOT_SESSION:-inbox-b}
+      # Grabación de llamadas. Vacío = manda el toggle por API. Con un número
+      # real, revisar el requisito legal de consentimiento antes de activarla.
+      - WACALLS_RECORDING=${WACALLS_RECORDING:-}
+    expose:
+      - '8080'
+    ports:
+      - '${WACALLS_UDP_PORT:-50000}:${WACALLS_UDP_PORT:-50000}/udp'
+    volumes:
+      - wacalls_data:/data
+
+volumes:
+  wacalls_data:
