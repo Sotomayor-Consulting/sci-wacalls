@@ -242,6 +242,11 @@ func TestWebhookChatID(t *testing.T) {
 	if got := webhookChatID(mk("+593998175516", "", nil)); got != "593998175516" {
 		t.Fatalf("phone: %q", got)
 	}
+	// identifier NO-JID (id de lead de un inbox API) NO se usa como destino: se
+	// ignora y cae al teléfono, que sí es un destino válido.
+	if got := webhookChatID(mk("+593939750012", "l_99f80a24-93dc-4ded-8020-1324e9e1d18c", nil)); got != "593939750012" {
+		t.Fatalf("lead identifier debería caer a phone: %q", got)
+	}
 }
 
 func TestResolveRecipient(t *testing.T) {
@@ -260,6 +265,11 @@ func TestResolveRecipient(t *testing.T) {
 	// vacío → error
 	if _, err := resolveRecipient(""); err == nil {
 		t.Fatal("vacío debería dar error")
+	}
+	// dígitos extraídos de un UUID de lead → demasiados dígitos → error (no arma un
+	// JID basura cuyo usync se colgaría hasta el timeout).
+	if _, err := resolveRecipient("l_99f80a24-93dc-4ded-8020-1324e9e1d18c"); err == nil {
+		t.Fatal("id de lead debería dar error, no un JID inventado")
 	}
 }
 

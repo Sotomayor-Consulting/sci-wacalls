@@ -603,12 +603,19 @@ func shouldRelay(p chatwootWebhookPayload) bool {
 }
 
 // webhookChatID resuelve el destino en WhatsApp desde el webhook, en orden:
-// custom attribute wacalls_chat_id (autoritativo) → identifier (JID) → teléfono.
+// custom attribute wacalls_chat_id (autoritativo) → identifier (solo si es JID) →
+// teléfono.
+//
+// El identifier SOLO se usa si es un JID de WhatsApp ("…@…"). En inboxes que no son
+// de wacalls (p.ej. un canal API con leads de ads) el identifier puede ser un ID
+// arbitrario como "l_uuid…"; tratarlo como destino hace que resolveRecipient extraiga
+// dígitos sueltos del UUID y arme un número inexistente, cuyo usync se cuelga hasta el
+// timeout. Ante un identifier no-JID, caemos al phone_number, que sí es fiable.
 func webhookChatID(p chatwootWebhookPayload) string {
 	if v, ok := p.Conversation.Meta.Sender.CustomAttributes[cwChatIDAttr].(string); ok && v != "" {
 		return v
 	}
-	if id := p.Conversation.Meta.Sender.Identifier; id != "" {
+	if id := p.Conversation.Meta.Sender.Identifier; strings.Contains(id, "@") {
 		return id
 	}
 	return strings.TrimPrefix(p.Conversation.Meta.Sender.PhoneNumber, "+")
@@ -622,6 +629,13 @@ func resolveRecipient(chatID string) (types.JID, error) {
 	d := onlyDigits(chatID)
 	if d == "" {
 		return types.JID{}, fmt.Errorf("destino vacío")
+	}
+	// Un número de WhatsApp (E.164) tiene entre ~7 y 15 dígitos. Fuera de ese rango
+	// casi seguro no es un teléfono sino un id mal formado (p.ej. dígitos extraídos de
+	// un UUID de lead); rechazar aquí evita mandar un usync a un número inexistente que
+	// se cuelga hasta el timeout.
+	if len(d) < 7 || len(d) > 15 {
+		return types.JID{}, fmt.Errorf("destino no parece un teléfono válido: %q", chatID)
 	}
 	return types.NewJID(d, types.DefaultUserServer), nil
 }

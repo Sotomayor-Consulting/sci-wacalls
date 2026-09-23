@@ -7,9 +7,11 @@ package main
 //   POST   /api/sessions/{sid}/chatwoot/webhook  recibe eventos de Chatwoot (outgoing -> WhatsApp)
 
 import (
+	"context"
 	"crypto/subtle"
 	"net/http"
 	"strconv"
+	"time"
 )
 
 func (s *server) handleSetChatwoot(w http.ResponseWriter, r *http.Request) {
@@ -96,7 +98,15 @@ func (s *server) handleChatwootWebhook(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "session not paired"})
 		return
 	}
-	if err := sess.deliverToWhatsApp(r.Context(), p); err != nil {
+	// El envío a WhatsApp NO debe atarse al contexto de la petición HTTP: si
+	// Chatwoot (o el proxy) agota su timeout del webhook y cierra la conexión,
+	// r.Context() se cancela y aborta el usync/SendMessage a medias
+	// ("failed to send usync query: context canceled"). Usamos el contexto de
+	// larga vida de la app con un timeout propio para que la entrega sobreviva
+	// al ciclo de vida de la petición.
+	ctx, cancel := context.WithTimeout(sess.mgr.appCtx, 60*time.Second)
+	defer cancel()
+	if err := sess.deliverToWhatsApp(ctx, p); err != nil {
 		sess.log.Error("chatwoot: deliver to whatsapp failed", "err", err)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
